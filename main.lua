@@ -87,7 +87,7 @@ local Context = {
     Settings = {
         AutoSwing = false,
         SwingDelay = 0.24,
-        AutoStageRun = false,
+        AutoStageRun = true,
         AutoMobs = false,
         CombatDistance = 8.0,
         MaxTargetRange = 45.0,
@@ -412,7 +412,11 @@ end
 -- ═══════════════════════════════════════════════════════════
 -- ЧЕЛОВЕЧЕСКИЙ АВТОЛУТ: персонаж лично доходит ногами (<= 5.5 studs) и подбирает
 -- ═══════════════════════════════════════════════════════════
-local FailedLootAttempts = {}
+-- ═══════════════════════════════════════════════════════════
+-- ЧЕЛОВЕЧЕСКИЙ ВИЗИТ К ДРОПУ: подойти ногами, постоять 1 сек и идти дальше
+-- Никакого спама пакетами! Личный подход игрока к ценному предмету.
+-- ═══════════════════════════════════════════════════════════
+local VisitedDrops = setmetatable({}, { __mode = "k" })
 local CurrentLootingDrop = nil
 local CurrentLootStartTime = 0
 
@@ -420,26 +424,21 @@ function Farm.FindBestLootTarget()
     local root = GetRootPart()
     if not root then return nil end
 
-    local maxRadius = Context.Settings.LootRadius or 55.0
+    local maxRadius = Context.Settings.LootRadius or 50.0
     local bestDrop = nil
     local bestDist = maxRadius
-    local now = os.clock()
 
     local function ScanFolder(folder)
         if not folder then return end
         for _, obj in ipairs(folder:GetChildren()) do
-            if obj and obj.Parent then
-                local failInfo = FailedLootAttempts[obj]
-                -- Пропускаем временно дроп если застряли на нём больше 5 секунд
-                if not (failInfo and (now - failInfo.firstTry) > 5.0 and (now - failInfo.lastFail) < 15.0) then
-                    local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
-                    if part then
-                        local dist = (Vector3.new(part.Position.X, 0, part.Position.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
-                        if dist <= maxRadius and dist < bestDist then
-                            if IsDropAllowed(obj) then
-                                bestDist = dist
-                                bestDrop = obj
-                            end
+            if obj and obj.Parent and not VisitedDrops[obj] then
+                local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
+                if part then
+                    local dist = (Vector3.new(part.Position.X, 0, part.Position.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
+                    if dist <= maxRadius and dist < bestDist then
+                        if IsDropAllowed(obj) then
+                            bestDist = dist
+                            bestDrop = obj
                         end
                     end
                 end
@@ -453,7 +452,7 @@ function Farm.FindBestLootTarget()
     return bestDrop
 end
 
--- Шаг автолута для главного цикла (возвращает true если занят подбором ценного дропа)
+-- Шаг подхода к дропу: если есть предмет выше легендарки — персонаж подходит, ждёт 1 сек и идёт дальше
 function Farm.ProcessLootStep()
     if not Context.Settings.AutoLoot then
         CurrentLootingDrop = nil
@@ -464,32 +463,33 @@ function Farm.ProcessLootStep()
     local hum = GetHumanoid()
     if not root or not hum then return false end
 
-    -- Если предыдущая цель исчезла — сбрасываем
-    if CurrentLootingDrop and (not CurrentLootingDrop.Parent or not IsDropAllowed(CurrentLootingDrop)) then
+    -- Если текущий предмет исчез или уже был посещён — сбрасываем
+    if CurrentLootingDrop and (not CurrentLootingDrop.Parent or VisitedDrops[CurrentLootingDrop]) then
         CurrentLootingDrop = nil
     end
 
-    -- Ищем ближайший дроп выше легендарки
+    -- Ищем ближайший ценный предмет
     if not CurrentLootingDrop then
         CurrentLootingDrop = Farm.FindBestLootTarget()
         CurrentLootStartTime = os.clock()
     end
 
     local dropObj = CurrentLootingDrop
-    if not dropObj or not dropObj.Parent then
+    if not dropObj or not dropObj.Parent or VisitedDrops[dropObj] then
         CurrentLootingDrop = nil
         return false
     end
 
-    -- Защита от бесконечного застревания (максимум 5 секунд на попытку)
+    -- Защита от долгого пути (не более 5 сек на дорогу к предмету)
     if (os.clock() - CurrentLootStartTime) > 5.0 then
-        FailedLootAttempts[dropObj] = { firstTry = CurrentLootStartTime, lastFail = os.clock() }
+        VisitedDrops[dropObj] = true
         CurrentLootingDrop = nil
         return false
     end
 
     local part = dropObj:IsA("BasePart") and dropObj or dropObj:FindFirstChildWhichIsA("BasePart", true)
     if not part then
+        VisitedDrops[dropObj] = true
         CurrentLootingDrop = nil
         return false
     end
@@ -500,13 +500,24 @@ function Farm.ProcessLootStep()
 
     EnforceGroundState()
 
-    -- Если подошли вплотную к предмету (<= 5.5 studs) — подбираем!
-    if dist <= 5.5 then
-        FirePickup(dropObj)
-        task.wait(0.08)
-        if not dropObj.Parent then
-            CurrentLootingDrop = nil
+    -- Если подошли вплотную (<= 4.5 studs) — стоим 1 сек и двигаемся дальше к новым локациям!
+    if dist <= 4.5 then
+        -- Одиночное нажатие промпта (если поддерживается инжектором)
+        local prompt = dropObj:FindFirstChildOfClass("ProximityPrompt", true)
+        if prompt and fireproximityprompt then
+            pcall(function()
+                prompt.HoldDuration = 0
+                prompt.RequiresLineOfSight = false
+                fireproximityprompt(prompt, 1, true)
+            end)
         end
+
+        -- Стоим ровно 1 секунду на месте, как просил пользователь
+        task.wait(1.0)
+
+        -- Помечаем предмет как посещённый, чтобы сразу переключиться на следующие зоны/мобов
+        VisitedDrops[dropObj] = true
+        CurrentLootingDrop = nil
         return true
     end
 
@@ -847,8 +858,8 @@ Tabs.Main:AddSlider("SwingSpeed", {
 
 -- Вкладка 2: Прохождение Этапов
 local ToggleStageRun = Tabs.Stages:AddToggle("AutoStageRun", {
-    Title = "🚀 Автопрохождение этапов (Идти вперёд -> Убить мобов -> Дальше)",
-    Default = false
+    Title = "🚀 Проход по локациям (Идти вперёд -> Убить мобов -> Дальше)",
+    Default = true
 })
 ToggleStageRun:OnChanged(function(val)
     Context.Settings.AutoStageRun = val
@@ -899,7 +910,7 @@ ToggleHeal:OnChanged(function(val) Context.Settings.SmartHeal = val end)
 
 -- Вкладка 3: Фильтр Лута
 local ToggleLoot = Tabs.Loot:AddToggle("AutoLoot", {
-    Title = "⚡ Авто-сбор лута (Человеческий подход)",
+    Title = "👣 Подходить к ценному дропу (подождать 1 сек и идти дальше)",
     Default = true
 })
 ToggleLoot:OnChanged(function(val) Context.Settings.AutoLoot = val end)
