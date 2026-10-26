@@ -3,7 +3,7 @@
     🎮 Game: [+1 Sword Loot Monarch] (PlaceId: 93239606899307)
     ⚡ Engine: Fluent UI (Nord / Deep Sea Edition)
     👑 Authors: Abror & Antigravity
-    🔬 Reengineered Architecture: Native Net & Protocol Integration
+    🔬 Architecture: Native Net & Protocol Integration (v2.2 Stages & Evasion)
     ═══════════════════════════════════════════════════════════════
 ]]
 
@@ -24,9 +24,8 @@ local VirtualUser = game:GetService("VirtualUser")
 local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
-local Camera = Workspace.CurrentCamera
 
--- 2. ПОДКЛЮЧЕНИЕ К ВНУТРЕННИМ МОДУЛЯМ ИГРЫ (Reverse-Engineered Core)
+-- 2. ПОДКЛЮЧЕНИЕ К ВНУТРЕННИМ МОДУЛЯМ ИГРЫ
 local Shared = ReplicatedStorage:WaitForChild("Shared", 15)
 local Net = require(Shared:WaitForChild("Net"):WaitForChild("Net"))
 local Protocol = require(Shared:WaitForChild("Net"):WaitForChild("Protocol"))
@@ -39,26 +38,32 @@ local SkillInput = require(ClientScripts:WaitForChild("SkillInput", 15))
 
 local HttpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
 
--- 3. СОСТОЯНИЕ СКРИПТА
+-- 3. СОСТОЯНИЕ
 local Context = {
     Running = true,
     Connections = {},
     Threads = {},
     LastFarmPosition = nil,
+    LastDashTime = 0,
+    LastStageTeleport = 0,
     StartTime = os.clock(),
     Settings = {
         AutoSwing = false,
         SwingDelay = 0.08,
+        AutoStageRun = false,
+        AutoMobs = false,
+        MobDistance = 5.5,
+        DodgeRadius = 7.0,
+        AutoDash = true,
+        SmartHeal = true,
         AutoRebirth = false,
         RebirthDelay = 2.0,
         AutoEquipBest = false,
         EquipInterval = 8.0,
-        AutoMobs = false,
-        MobDistance = 6.0,
         AutoLoot = true,
         LootInterval = 1.0,
-        AutoStage = false,
-        StageInterval = 10.0,
+        AutoStage = true,
+        StageInterval = 5.0,
         AntiAFK = true,
         AutoReturn = true,
         FPSBoost = false,
@@ -80,7 +85,6 @@ local function SpawnThread(fn)
         while Context.Running do
             local success, err = pcall(fn)
             if not success and Context.Running then
-                warn("[Sword Monarch Thread Error]:", err)
                 task.wait(1)
             end
         end
@@ -96,6 +100,11 @@ end
 local function GetRootPart()
     local char = GetCharacter()
     return char:WaitForChild("HumanoidRootPart", 5)
+end
+
+local function GetHumanoid()
+    local char = GetCharacter()
+    return char:WaitForChild("Humanoid", 5)
 end
 
 local function GetStats()
@@ -115,28 +124,28 @@ end
 -- 5. МОДУЛИ ФАРМА
 local Farm = {}
 
--- Фарм силы (Прямой вызов сетевого протокола TrainManualClick)
+-- Фарм силы через прямой сетевой протокол
 function Farm.ClickTrain()
     pcall(function()
         Net.FireServer(Msg.TrainManualClick)
     end)
 end
 
--- Авто-экипировка лучшего меча (Нативный InvokeServer)
+-- Авто-экипировка лучшего оружия
 function Farm.EquipBest()
     pcall(function()
         Net.InvokeServer(Msg.InvEquipBest)
     end)
 end
 
--- Авто-ребёрф (Нативный InvokeServer)
+-- Авто-ребёрф
 function Farm.Rebirth()
     pcall(function()
         Net.InvokeServer(Msg.PlayerRebirth)
     end)
 end
 
--- Сбор лута и сундуков из DropsClient
+-- Авто-сбор выпавшего лута и сундуков
 function Farm.CollectLoot()
     local drops = Workspace:FindFirstChild("DropsClient")
     if not drops then return end
@@ -147,7 +156,7 @@ function Farm.CollectLoot()
     end
 end
 
--- Переход в максимальную открытую зону (StageTeleport)
+-- Авто-переход в максимальную открытую зону
 function Farm.TeleportMaxStage()
     local stats = GetStats()
     if stats.Stage and stats.Stage > 0 then
@@ -184,23 +193,80 @@ function Farm.GetTargetEnemy()
     return bestTarget
 end
 
--- Атака моба/босса с безопасной высоты
-function Farm.AttackTarget(target)
+-- Атака моба с круговым уворотом (Orbital Evasion) и дэшем
+function Farm.AttackTargetWithEvasion(target)
     local root = GetRootPart()
+    local hum = GetHumanoid()
     if not root or not target or not target.Root or target.Hum.Health <= 0 then return end
 
-    -- Позиционирование ровно над мобом (моб не достает ближним боем)
-    local safePos = target.Root.CFrame * CFrame.new(0, Context.Settings.MobDistance, 0) * CFrame.Angles(math.rad(-90), 0, 0)
-    root.CFrame = safePos
+    -- 1. Безопасный откат при критическом здоровье (<35% HP)
+    if Context.Settings.SmartHeal and hum and hum.Health > 0 and (hum.Health / hum.MaxHealth) < 0.35 then
+        local safeSpot = target.Root.CFrame * CFrame.new(0, 14, 22)
+        root.CFrame = safeSpot
+        root.Velocity = Vector3.zero
+        task.wait(0.4)
+        return
+    end
+
+    -- 2. Динамический круговой стрейф вокруг моба
+    local angle = (os.clock() * 3.2)
+    local radius = Context.Settings.DodgeRadius or 7.0
+    local height = Context.Settings.MobDistance or 5.5
+
+    local offsetX = math.cos(angle) * radius
+    local offsetZ = math.sin(angle) * radius
+
+    local targetPos = target.Root.Position + Vector3.new(offsetX, height, offsetZ)
+    root.CFrame = CFrame.lookAt(targetPos, target.Root.Position)
     root.Velocity = Vector3.zero
 
-    -- Применение всех доступных скиллов и обычной атаки
+    -- 3. Нативный дэш для уклонения от сильных атак
+    local now = os.clock()
+    if Context.Settings.AutoDash and (now - Context.LastDashTime) > 2.8 then
+        Context.LastDashTime = now
+        pcall(function()
+            SkillInput.Press(Enums.SkillSlot.Dash)
+        end)
+    end
+
+    -- 4. Ротация всех скиллов и ударов
     pcall(function()
         SkillInput.Press(Enums.SkillSlot.NormalAttack)
         SkillInput.Press(Enums.SkillSlot.Skill1)
         SkillInput.Press(Enums.SkillSlot.Skill2)
         SkillInput.Press(Enums.SkillSlot.Skill3)
     end)
+end
+
+-- Продвижение вперёд по этапу к воротам или следующей пачке мобов
+function Farm.AdvanceStageForward()
+    local root = GetRootPart()
+    local hum = GetHumanoid()
+    if not root or not hum then return end
+
+    -- Поиск интерактивных ворот/портала этапа
+    local portalPos = nil
+    local portalNames = { "StageGate", "Portal", "StageTeleporter", "Gate", "Finish", "NextStage" }
+    for _, name in ipairs(portalNames) do
+        local obj = Workspace:FindFirstChild(name, true)
+        if obj and (obj:IsA("BasePart") or obj:IsA("Model")) then
+            local pos = obj:IsA("Model") and (obj.PrimaryPart and obj.PrimaryPart.Position or obj:GetPivot().Position) or obj.Position
+            if (pos - root.Position).Magnitude < 180 then
+                portalPos = pos
+                break
+            end
+        end
+    end
+
+    if portalPos then
+        hum:MoveTo(portalPos)
+    else
+        -- Движение вперёд по направлению коридора
+        local lookDir = root.CFrame.LookVector * Vector3.new(1, 0, 1)
+        if lookDir.Magnitude > 0.05 then
+            hum:MoveTo(root.Position + lookDir.Unit * 30)
+        end
+    end
 end
 
 -- 6. FAILSAFE И СИСТЕМА ВОЗВРАТА
@@ -235,6 +301,26 @@ TrackConnection(RunService.Heartbeat:Connect(function()
     end
 end))
 
+-- Перехват события StageCleared для автоматического перехода на следующий этап
+local function SetupGameEvents()
+    local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local MainEvent = Remotes and Remotes:FindFirstChild("MainEvent")
+    if MainEvent then
+        TrackConnection(MainEvent.OnClientEvent:Connect(function(msgId, ...)
+            if msgId == Msg.StageCleared then
+                task.delay(0.8, function()
+                    Farm.CollectLoot()
+                    if Context.Settings.AutoStage or Context.Settings.AutoStageRun then
+                        task.wait(0.5)
+                        Farm.TeleportMaxStage()
+                    end
+                end)
+            end
+        end))
+    end
+end
+SetupGameEvents()
+
 -- 7. DISCORD WEBHOOK
 local function SendWebhook()
     if not Context.Settings.WebhookEnabled or Context.Settings.WebhookURL == "" or not HttpRequest then return end
@@ -254,8 +340,8 @@ local function SendWebhook()
                 { name = "⚡ Сила / Power", value = "`" .. tostring(math.floor(stats.Power)) .. "`", inline = false },
                 { name = "🔄 Перерождения", value = "`" .. tostring(stats.Rebirth) .. "`", inline = true },
                 { name = "💰 Монеты", value = "`" .. tostring(stats.Coins) .. "`", inline = true },
-                { name = "🗺️ Макс. Зона", value = "`Stage " .. tostring(stats.Stage) .. "`", inline = true },
-                { name = "🛡️ Failsafe", value = Context.Settings.AutoReturn and "🟢 Активен" or "🔴 Выключен", inline = true }
+                { name = "🗺️ Макс. Этап", value = "`Stage " .. tostring(stats.Stage) .. "`", inline = true },
+                { name = "🛡️ Режим боя", value = Context.Settings.AutoStageRun and "⚡ Stage Progression" or "🗡️ Normal Farm", inline = true }
             },
             footer = { text = "Sword Loot Monarch • by Abror" },
             timestamp = DateTime.now():ToIsoDate()
@@ -276,7 +362,7 @@ end
 -- Поток тренировки силы
 SpawnThread(function()
     while Context.Running do
-        if Context.Settings.AutoSwing and not Context.Settings.AutoMobs then
+        if Context.Settings.AutoSwing and not Context.Settings.AutoStageRun and not Context.Settings.AutoMobs then
             local root = GetRootPart()
             if root and not Context.LastFarmPosition then
                 Context.LastFarmPosition = root.CFrame
@@ -289,16 +375,27 @@ SpawnThread(function()
     end
 end)
 
--- Поток мобов и боссов
+-- Поток автопрохождения этапов, мобов и уворотов
 SpawnThread(function()
     while Context.Running do
-        if Context.Settings.AutoMobs then
+        if Context.Settings.AutoStageRun or Context.Settings.AutoMobs then
             local target = Farm.GetTargetEnemy()
             if target then
-                Farm.AttackTarget(target)
+                Farm.AttackTargetWithEvasion(target)
                 task.wait(Context.Settings.SwingDelay)
             else
-                task.wait(0.3)
+                -- Если все мобы в зоне зачищены
+                if Context.Settings.AutoStageRun then
+                    Farm.AdvanceStageForward()
+                    Farm.CollectLoot()
+
+                    local now = os.clock()
+                    if Context.Settings.AutoStage and (now - Context.LastStageTeleport) > Context.Settings.StageInterval then
+                        Context.LastStageTeleport = now
+                        Farm.TeleportMaxStage()
+                    end
+                end
+                task.wait(0.25)
             end
         else
             task.wait(0.3)
@@ -342,18 +439,6 @@ SpawnThread(function()
     end
 end)
 
--- Поток перехода по зонам
-SpawnThread(function()
-    while Context.Running do
-        if Context.Settings.AutoStage then
-            Farm.TeleportMaxStage()
-            task.wait(Context.Settings.StageInterval)
-        else
-            task.wait(2)
-        end
-    end
-end)
-
 -- Поток Webhook
 SpawnThread(function()
     while Context.Running do
@@ -371,7 +456,7 @@ local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Abror • v2.1 Native",
+    SubTitle = "by Abror • v2.2 Stages",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -381,7 +466,7 @@ local Window = Fluent:CreateWindow({
 
 local Tabs = {
     Main = Window:AddTab({ Title = "Фарм", Icon = "swords" }),
-    Combat = Window:AddTab({ Title = "Мобы и Боссы", Icon = "crosshair" }),
+    Stages = Window:AddTab({ Title = "Этапы & Бой", Icon = "crosshair" }),
     Progress = Window:AddTab({ Title = "Прокачка", Icon = "trending-up" }),
     Utility = Window:AddTab({ Title = "Сервис & AFK", Icon = "cpu" }),
     Webhook = Window:AddTab({ Title = "Discord", Icon = "bell" }),
@@ -400,7 +485,7 @@ ToggleSwing:OnChanged(function(val)
 end)
 
 Tabs.Main:AddSlider("SwingSpeed", {
-    Title = "Задержка клика (сек)",
+    Title = "Задержка клика / атаки (сек)",
     Default = 0.08,
     Min = 0.03,
     Max = 0.5,
@@ -423,24 +508,58 @@ Tabs.Main:AddButton({
     end
 })
 
--- Вкладка 2: Мобы и Боссы
-local ToggleMobs = Tabs.Combat:AddToggle("AutoMobs", { Title = "Авто-фарм мобов (EnemiesClient)", Default = false })
-ToggleMobs:OnChanged(function(val)
-    Context.Settings.AutoMobs = val
+-- Вкладка 2: Прохождение Этапов и Уклонение
+local ToggleStageRun = Tabs.Stages:AddToggle("AutoStageRun", {
+    Title = "🚀 Автопрохождение этапов (Run, Dodge & Clear)",
+    Default = false
+})
+ToggleStageRun:OnChanged(function(val)
+    Context.Settings.AutoStageRun = val
     if val then
         local root = GetRootPart()
         if root then Context.LastFarmPosition = root.CFrame end
-        Fluent:Notify({ Title = "Бой", Content = "Авто-охота активирована с безопасной высоты.", Duration = 3 })
+        Fluent:Notify({
+            Title = "Прохождение этапов",
+            Content = "Запущен цикл продвижения вперёд, зачистки волн и уклонения!",
+            Duration = 3.5
+        })
     end
 end)
 
-Tabs.Combat:AddSlider("MobElevation", {
-    Title = "Безопасная высота над мобом (Studs)",
-    Default = 6.0,
-    Min = 4.0,
-    Max = 15.0,
+local ToggleMobs = Tabs.Stages:AddToggle("AutoMobs", {
+    Title = "Авто-фарм только ближайших мобов (без бега вперёд)",
+    Default = false
+})
+ToggleMobs:OnChanged(function(val) Context.Settings.AutoMobs = val end)
+
+local ToggleDash = Tabs.Stages:AddToggle("AutoDash", {
+    Title = "Использовать рывок (Dash) для уклонения",
+    Default = true
+})
+ToggleDash:OnChanged(function(val) Context.Settings.AutoDash = val end)
+
+local ToggleHeal = Tabs.Stages:AddToggle("SmartHeal", {
+    Title = "Безопасный откат при низком здоровье (<35% HP)",
+    Default = true
+})
+ToggleHeal:OnChanged(function(val) Context.Settings.SmartHeal = val end)
+
+Tabs.Stages:AddSlider("MobElevation", {
+    Title = "Высота зависания над мобом (Studs)",
+    Default = 5.5,
+    Min = 3.5,
+    Max = 12.0,
     Rounding = 1,
     Callback = function(val) Context.Settings.MobDistance = val end
+})
+
+Tabs.Stages:AddSlider("DodgeRadius", {
+    Title = "Радиус кругового стрейфа (Studs)",
+    Default = 7.0,
+    Min = 4.0,
+    Max = 14.0,
+    Rounding = 1,
+    Callback = function(val) Context.Settings.DodgeRadius = val end
 })
 
 -- Вкладка 3: Прокачка
@@ -450,7 +569,7 @@ ToggleRebirth:OnChanged(function(val) Context.Settings.AutoRebirth = val end)
 local ToggleEquip = Tabs.Progress:AddToggle("AutoEquip", { Title = "Авто-экипировка лучшего меча (InvEquipBest)", Default = false })
 ToggleEquip:OnChanged(function(val) Context.Settings.AutoEquipBest = val end)
 
-local ToggleStage = Tabs.Progress:AddToggle("AutoStage", { Title = "Авто-переход в макс. открытую зону", Default = false })
+local ToggleStage = Tabs.Progress:AddToggle("AutoStage", { Title = "Авто-переход на максимальный этап", Default = true })
 ToggleStage:OnChanged(function(val) Context.Settings.AutoStage = val end)
 
 Tabs.Progress:AddButton({
@@ -552,9 +671,9 @@ function Context:Unload()
     print("[Sword Monarch]: Выгружен из памяти.")
 end
 
-Window:SelectTab(1)
+Window:SelectTab(2) -- Сразу открываем вкладку «Этапы & Бой»
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "Скрипт v2.1 Native загружен! Автор: Abror. Меню: LeftControl.",
+    Content = "v2.2 Stages & Evasion загружен! Автор: Abror. Меню: LeftControl.",
     Duration = 4
 })
