@@ -1,11 +1,12 @@
 --[[
     ═══════════════════════════════════════════════════════════════
     ⚔️ [+1 Sword Loot Monarch] - Universal GitHub Loader
-    👑 Author: Abror
+    👑 Author: Ryomotik
+    ⚡ Version: v2.4 Amethyst Edition
     ═══════════════════════════════════════════════════════════════
 ]]
 
-local rawUrl = "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/SwordLootMonarch-Autofarm/main/main.lua"
+local rawUrl = "https://raw.githubusercontent.com/ryomotik/SwordLootMonarch-Autofarm/main/main.lua"
 
 local success, result = pcall(function()
     return game:HttpGet(rawUrl, true)

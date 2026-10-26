@@ -1,9 +1,10 @@
 --[[
     ═══════════════════════════════════════════════════════════════
     🎮 Game: [+1 Sword Loot Monarch] (PlaceId: 93239606899307)
-    ⚡ Engine: Fluent UI (Nord / Deep Sea Edition)
-    👑 Authors: Abror & Antigravity
-    🔬 Architecture: 100% Legit Ground Movement & Loot Filter (v2.3)
+    ⚡ Engine: Fluent UI (Amethyst Purple Edition)
+    👑 Author: Ryomotik
+    🛠️ Co-Developer: Antigravity Automation
+    🔬 Version: v2.4 Smooth Draggable & Ground Combat
     ═══════════════════════════════════════════════════════════════
 ]]
 
@@ -21,6 +22,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local VirtualUser = game:GetService("VirtualUser")
+local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
@@ -61,11 +63,10 @@ local Context = {
         EquipInterval = 8.0,
         AutoLoot = true,
         LootInterval = 0.8,
-        MinLootTier = 7, -- 6 = Mythic+, 7 = Выше мификов (Divine/Secret/Celestial+)
+        MinLootTier = 7, -- 7 = Выше мификов (Divine / Secret / Celestial+), 6 = Mythic+
         AutoStage = true,
         StageInterval = 5.0,
         AntiAFK = true,
-        AutoReturn = false, -- Отключен агрессивный возврат чтобы избежать проверок античита
         FPSBoost = false,
         WebhookEnabled = false,
         WebhookURL = "",
@@ -135,6 +136,52 @@ local function GetStats()
         }
     end
     return { Power = 0, Coins = 0, Rebirth = 0, Level = 1, Stage = 1 }
+end
+
+-- Плавное и стабильное перетаскивание окна (Smooth Dragging)
+local function EnableSmoothDrag(frame, dragHandle)
+    dragHandle = dragHandle or frame
+    local dragging = false
+    local dragInput = nil
+    local dragStart = nil
+    local startPos = nil
+
+    local function update(input)
+        local delta = input.Position - dragStart
+        local newPos = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+        TweenService:Create(frame, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Position = newPos }):Play()
+    end
+
+    TrackConnection(dragHandle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end))
+
+    TrackConnection(dragHandle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end))
+
+    TrackConnection(UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            update(input)
+        end
+    end))
 end
 
 -- 5. МОДУЛИ ФАРМА
@@ -297,10 +344,8 @@ function Farm.AttackTargetLegit(target)
 
     -- 2. Естественное перемещение по земле ногами
     if dist > desiredDist + 3 then
-        -- Подбегаем к мобу ногами
         hum:MoveTo(targetPos)
     elseif dist < desiredDist - 2 then
-        -- Слегка отходим назад если моб наступает
         local backPos = myPos - toTarget.Unit * 3
         hum:MoveTo(backPos)
     else
@@ -339,7 +384,6 @@ function Farm.AdvanceStageForward()
     local hum = GetHumanoid()
     if not root or not hum then return end
 
-    -- Поиск интерактивных ворот/портала
     local portalPos = nil
     local portalNames = { "StageGate", "Portal", "StageTeleporter", "Gate", "Finish", "NextStage" }
     for _, name in ipairs(portalNames) do
@@ -356,7 +400,6 @@ function Farm.AdvanceStageForward()
     if portalPos then
         hum:MoveTo(portalPos)
     else
-        -- Бег вперёд по направлению коридора
         local lookDir = root.CFrame.LookVector * Vector3.new(1, 0, 1)
         if lookDir.Magnitude > 0.05 then
             hum:MoveTo(root.Position + lookDir.Unit * 30)
@@ -406,9 +449,9 @@ local function SendWebhook()
     local payload = {
         embeds = {{
             title = "⚔️ [+1 Sword Loot Monarch] • Отчёт автофарма",
-            color = 2337742,
+            color = 9127187, -- Amethyst Purple Hex
             fields = {
-                { name = "👑 Разработчик", value = "`Abror`", inline = true },
+                { name = "👑 Разработчик", value = "`Ryomotik`", inline = true },
                 { name = "👤 Игрок", value = "`" .. LocalPlayer.Name .. " (" .. LocalPlayer.DisplayName .. ")`", inline = true },
                 { name = "⏱️ Время сессии", value = "`" .. uptime .. "`", inline = true },
                 { name = "⚡ Сила / Power", value = "`" .. tostring(math.floor(stats.Power)) .. "`", inline = false },
@@ -417,7 +460,7 @@ local function SendWebhook()
                 { name = "🗺️ Макс. Этап", value = "`Stage " .. tostring(stats.Stage) .. "`", inline = true },
                 { name = "🛡️ Режим боя", value = "🟢 100% Legit Ground (Anti-Kick)", inline = true }
             },
-            footer = { text = "Sword Loot Monarch • by Abror" },
+            footer = { text = "Sword Loot Monarch • by Ryomotik" },
             timestamp = DateTime.now():ToIsoDate()
         }}
     }
@@ -520,18 +563,39 @@ SpawnThread(function()
     end
 end)
 
--- 9. FLUENT UI
+-- 9. FLUENT UI (Amethyst Purple Edition)
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Abror • v2.3 Legit Ground",
+    SubTitle = "by Ryomotik • v2.4 Amethyst",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
-    Theme = "Aqua",
+    Theme = "Amethyst",
     MinimizeKey = Enum.KeyCode.LeftControl
 })
+Fluent:SetTheme("Amethyst")
+
+-- Подключение плавного перемещения окна (Smooth Dragging)
+task.defer(function()
+    pcall(function()
+        if Window and Window.Frame then
+            Window.Frame.Active = true
+            EnableSmoothDrag(Window.Frame, Window.TopBar or Window.Frame)
+        end
+        local guiParent = (gethui and gethui()) or game:GetService("CoreGui")
+        for _, gui in ipairs(guiParent:GetChildren()) do
+            if gui:IsA("ScreenGui") and (string.find(gui.Name:lower(), "fluent") or gui:FindFirstChild("Main") or gui:FindFirstChild("Window")) then
+                local mainF = gui:FindFirstChild("Main") or gui:FindFirstChild("Window") or gui:FindFirstChildWhichIsA("Frame")
+                if mainF then
+                    mainF.Active = true
+                    EnableSmoothDrag(mainF, mainF:FindFirstChild("TopBar") or mainF:FindFirstChild("Header") or mainF)
+                end
+            end
+        end
+    end)
+end)
 
 local Tabs = {
     Main = Window:AddTab({ Title = "Фарм", Icon = "swords" }),
@@ -727,6 +791,6 @@ end
 Window:SelectTab(2)
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "v2.3 Legit Ground загружен! Автор: Abror. Меню: LeftControl.",
+    Content = "v2.4 Amethyst загружен! Автор: Ryomotik. Меню: LeftControl.",
     Duration = 4
 })
