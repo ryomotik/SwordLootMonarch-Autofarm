@@ -4,7 +4,7 @@
     ⚡ Engine: Fluent UI (Amethyst Purple Edition)
     👑 Author: Ryomotik
     🛠️ Co-Developer: Antigravity Automation
-    🔬 Version: v2.9 Natural Ground Walking & Footstep Navigation (Zero Air Diving / Pure Legs Movement)
+    🔬 Version: v3.0 Ground Walker — Raycast Grounded Movement + Human Loot
     ═══════════════════════════════════════════════════════════════
 ]]
 
@@ -13,6 +13,7 @@ if getgenv().SwordMonarchInstance then
     pcall(function()
         getgenv().SwordMonarchInstance:Unload()
     end)
+    task.wait(0.3)
 end
 
 -- 1. СЕРВИСЫ
@@ -45,7 +46,6 @@ local Context = {
     Running = true,
     Connections = {},
     Threads = {},
-    LastFarmPosition = nil,
     LastDashTime = 0,
     StartTime = os.clock(),
     Settings = {
@@ -54,19 +54,18 @@ local Context = {
         AutoStageRun = false,
         AutoMobs = false,
         CombatDistance = 8.0,
-        MaxTargetRange = 45.0, -- Только мобы в радиусе 45 studs! Никакого таргета за 300+ studs!
-        AutoDash = false, -- Отключено по умолчанию для естественной ходьбы ногами
+        MaxTargetRange = 45.0,
+        AutoDash = false,
         SmartHeal = true,
         AutoRebirth = false,
         RebirthDelay = 2.0,
         AutoEquipBest = false,
         EquipInterval = 8.0,
         AutoLoot = true,
-        LootAll = false, -- Собирать абсолютно весь дроп без ограничений
-        MinLootTier = 6, -- 6 = Мифик и выше (Mythic, Celestial, Secret, Divine, Zenith)
-        LootMagnet = true, -- Физический вакуум/магнит дропов прямо к ногам
-        LootRadius = 85.0, -- Радиус сбора лута
-        LootInterval = 0.2, -- Высокая частота цикла сбора
+        LootAll = false,
+        MinLootTier = 6,
+        LootRadius = 60.0,
+        LootInterval = 0.3,
         AntiAFK = true,
         FPSBoost = false,
         WebhookEnabled = false,
@@ -123,64 +122,86 @@ local function GetStats()
     return { Power = 0, Coins = 0, Rebirth = 0, Level = 1, CareerMaxStage = 1 }
 end
 
--- Идеальное плавное перетаскивание окна (Fluent Window Dragging)
-local function SetupWindowDragging(win)
-    local rootFrame = win and (win.Root or win.Frame)
-    if not rootFrame then
-        local gui = (win and win.GUI) or Fluent.GUI or (gethui and gethui():FindFirstChildOfClass("ScreenGui"))
-        if gui then
-            rootFrame = gui:FindFirstChildWhichIsA("Frame", true)
-        end
+-- ═══════════════════════════════════════════════════════════
+-- RAYCAST GROUND CLAMP — определение реальной поверхности земли
+-- ═══════════════════════════════════════════════════════════
+local RaycastParams_Ground = RaycastParams.new()
+RaycastParams_Ground.FilterType = Enum.RaycastFilterType.Exclude
+
+local function GetGroundY(position)
+    -- Обновляем фильтр каждый раз (персонаж может респавниться)
+    local char = GetCharacter()
+    if char then
+        RaycastParams_Ground.FilterDescendantsInstances = {char, Workspace:FindFirstChild("DropsClient"), Workspace:FindFirstChild("EnemiesClient")}
     end
-    if not rootFrame then return end
 
-    -- Перетаскивание привязано строго к заголовку (TitleBar), не ломая клики по кнопкам и вкладкам
-    local titleBar = (win and win.TitleBar and win.TitleBar.Frame) or rootFrame:FindFirstChild("TitleBar", true) or rootFrame:FindFirstChildWhichIsA("Frame")
-    if not titleBar then return end
+    -- Кастуем луч вниз от позиции + 5 studs вверх
+    local origin = Vector3.new(position.X, position.Y + 5, position.Z)
+    local result = Workspace:Raycast(origin, Vector3.new(0, -50, 0), RaycastParams_Ground)
+    if result then
+        return result.Position.Y + 3 -- +3 studs = примерная высота HumanoidRootPart над землёй
+    end
 
-    titleBar.Active = true
+    -- Фоллбэк: кастуем с высоты 200
+    local resultHigh = Workspace:Raycast(Vector3.new(position.X, 200, position.Z), Vector3.new(0, -400, 0), RaycastParams_Ground)
+    if resultHigh then
+        return resultHigh.Position.Y + 3
+    end
 
-    local dragging = false
-    local dragStart = nil
-    local startPos = nil
+    return position.Y -- Если ничего не нашли, оставляем как есть
+end
 
-    TrackConnection(titleBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = rootFrame.Position
+local function GetGroundPosition(x, z)
+    local y = GetGroundY(Vector3.new(x, 100, z))
+    return Vector3.new(x, y, z)
+end
 
-            local endConn
-            endConn = input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                    if endConn then endConn:Disconnect() end
+-- ═══════════════════════════════════════════════════════════
+-- GROUND ENFORCEMENT — принудительное удержание на земле
+-- Фоновый цикл: если персонаж в воздухе без причины -> возвращаем на землю
+-- ═══════════════════════════════════════════════════════════
+local function EnforceGroundState()
+    local hum = GetHumanoid()
+    local root = GetRootPart()
+    if not hum or not root then return end
+
+    -- Сброс состояний, вызывающих парение
+    if hum.PlatformStand then hum.PlatformStand = false end
+    if hum.Sit then hum.Sit = false end
+    hum.AutoRotate = true
+
+    -- Удаляем BodyMovers которые могут подбрасывать персонажа
+    local char = GetCharacter()
+    if char then
+        for _, obj in ipairs(char:GetDescendants()) do
+            if obj:IsA("BodyVelocity") or obj:IsA("BodyPosition") or obj:IsA("BodyGyro") or obj:IsA("LinearVelocity") or obj:IsA("VectorForce") then
+                -- Не трогаем стандартные Roblox объекты
+                if obj.Name ~= "RootJoint" and not string.find(obj.Name, "Animate") then
+                    pcall(function() obj:Destroy() end)
                 end
-            end)
-        end
-    end))
-
-    TrackConnection(UserInputService.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - dragStart
-            local targetPos = UDim2.new(
-                startPos.X.Scale,
-                startPos.X.Offset + delta.X,
-                startPos.Y.Scale,
-                startPos.Y.Offset + delta.Y
-            )
-            rootFrame.Position = targetPos
-            if win then
-                win.Position = targetPos
             end
         end
-    end))
+    end
 
-    TrackConnection(UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
+    -- Если Humanoid в состоянии Freefall, но есть пол под ногами -> форсируем Running
+    local state = hum:GetState()
+    if state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.FallingDown then
+        local groundY = GetGroundY(root.Position)
+        local deltaY = root.Position.Y - groundY
+        if deltaY < 2 and deltaY > -2 then
+            -- Мы рядом с землёй но Humanoid думает что летим
+            hum:ChangeState(Enum.HumanoidStateType.Running)
         end
-    end))
+    end
+
+    -- Если вертикальная скорость слишком высокая без причины — обнуляем
+    if root.AssemblyLinearVelocity.Y > 15 and state ~= Enum.HumanoidStateType.Jumping then
+        root.AssemblyLinearVelocity = Vector3.new(
+            root.AssemblyLinearVelocity.X,
+            0,
+            root.AssemblyLinearVelocity.Z
+        )
+    end
 end
 
 -- 5. МОДУЛИ ФАРМА
@@ -278,67 +299,12 @@ function Farm.GetDropRarity(dropObj)
     return 1
 end
 
-local LastLootPickupTime = 0
-
--- Обработка и моментальный сбор конкретного дропа (без физического флинга и с защитой от rate-limit 15/sec)
-function Farm.ProcessDrop(obj)
-    if not obj or not obj.Parent then return end
-    local root = GetRootPart()
-    if not root then return end
-
-    local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
-    if not part then return end
-
-    local dist = (part.Position - root.Position).Magnitude
-    local maxRadius = Context.Settings.LootRadius or 85.0
-    if dist > maxRadius then return end
-
-    -- Определение редкости и сундуков
-    local rarity = Farm.GetDropRarity(obj)
-    local isBossOrChest = false
-    local objNameLower = string.lower(obj.Name)
-    if string.find(objNameLower, "chest") or string.find(objNameLower, "boss") or string.find(objNameLower, "box") then
-        isBossOrChest = true
-    end
-
+-- Извлечение UID из дропа
+local function ExtractDropUID(obj)
+    local uid = nil
     local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
+
     if prompt then
-        local pText = string.lower(prompt.ObjectText .. " " .. prompt.ActionText)
-        if string.find(pText, "chest") or string.find(pText, "boss") or string.find(pText, "box") or string.find(pText, "сундук") then
-            isBossOrChest = true
-        end
-    end
-
-    -- Фильтрация лута
-    local isAllowed = false
-    if Context.Settings.LootAll or isBossOrChest then
-        isAllowed = true
-    else
-        local minTier = Context.Settings.MinLootTier or 6
-        if rarity >= minTier then
-            isAllowed = true
-        end
-    end
-
-    if not isAllowed then return end
-
-    -- Защита от кика по превышению пакетов DropPickup (лимит сервера: max 15 в секунду)
-    local now = os.clock()
-    if (now - LastLootPickupTime) < 0.09 then
-        return
-    end
-    LastLootPickupTime = now
-
-    -- Активация ProximityPrompt и сбор
-    if prompt then
-        pcall(function()
-            prompt.HoldDuration = 0
-            prompt.MaxActivationDistance = 99999
-            prompt.RequiresLineOfSight = false
-        end)
-
-        -- Извлечение UID из памяти замыкания Triggered
-        local uid = nil
         local getconn = getconnections
         local getupv = (debug and debug.getupvalues) or getupvalues
         if getconn and getupv then
@@ -356,23 +322,54 @@ function Farm.ProcessDrop(obj)
                 end
             end)
         end
+    end
 
-        if not uid then
-            local rawUid = obj:GetAttribute("UID") or obj:GetAttribute("uid") or obj:GetAttribute("Id")
-            uid = tonumber(rawUid) or tonumber(string.match(obj.Name, "%d+"))
-        end
+    if not uid then
+        local rawUid = obj:GetAttribute("UID") or obj:GetAttribute("uid") or obj:GetAttribute("Id")
+        uid = tonumber(rawUid) or tonumber(string.match(obj.Name, "%d+"))
+    end
 
-        -- Прямой сетевой вызов
-        if uid then
-            pcall(function()
-                Net.FireServer(Msg.DropPickup, uid)
-            end)
+    return uid
+end
+
+-- Подобрать конкретный дроп (отправить серверу запрос на подбор)
+local LastLootPickupTime = 0
+
+local function FirePickup(obj)
+    -- Защита от rate-limit (max 15/sec)
+    local now = os.clock()
+    if (now - LastLootPickupTime) < 0.09 then return false end
+    LastLootPickupTime = now
+
+    local uid = ExtractDropUID(obj)
+
+    -- Прямой сетевой вызов
+    if uid then
+        pcall(function()
+            Net.FireServer(Msg.DropPickup, uid)
+        end)
+    end
+
+    -- ProximityPrompt fire
+    local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
+    if prompt then
+        pcall(function()
+            prompt.HoldDuration = 0
+            prompt.MaxActivationDistance = 99999
+            prompt.RequiresLineOfSight = false
+        end)
+
+        if fireproximityprompt then
+            pcall(fireproximityprompt, prompt, 1, true)
+            pcall(fireproximityprompt, prompt, 0, true)
+            pcall(fireproximityprompt, prompt)
         end
 
         if firesignal then
             pcall(firesignal, prompt.Triggered)
         end
 
+        local getconn = getconnections
         if getconn then
             pcall(function()
                 for _, conn in ipairs(getconn(prompt.Triggered)) do
@@ -381,42 +378,135 @@ function Farm.ProcessDrop(obj)
                 end
             end)
         end
-
-        if fireproximityprompt then
-            pcall(fireproximityprompt, prompt, 1, true)
-            pcall(fireproximityprompt, prompt, 0, true)
-            pcall(fireproximityprompt, prompt)
-        end
-    else
-        local rawUid = obj:GetAttribute("UID") or obj:GetAttribute("uid") or obj:GetAttribute("Id")
-        local uid = tonumber(rawUid) or tonumber(string.match(obj.Name, "%d+"))
-        if uid then
-            pcall(function()
-                Net.FireServer(Msg.DropPickup, uid)
-            end)
-        end
     end
+
+    return true
 end
 
--- Сбор всех предметов в мире
-function Farm.CollectLoot()
-    local drops = Workspace:FindFirstChild("DropsClient")
-    if drops then
-        for _, obj in ipairs(drops:GetChildren()) do
-            Farm.ProcessDrop(obj)
+-- Проверка: допустим ли дроп по фильтру
+local function IsDropAllowed(obj)
+    local rarity = Farm.GetDropRarity(obj)
+
+    -- Сундуки/боссы всегда подбираем
+    local objNameLower = string.lower(obj.Name)
+    if string.find(objNameLower, "chest") or string.find(objNameLower, "boss") or string.find(objNameLower, "box") then
+        return true
+    end
+
+    local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
+    if prompt then
+        local pText = string.lower(prompt.ObjectText .. " " .. prompt.ActionText)
+        if string.find(pText, "chest") or string.find(pText, "boss") or string.find(pText, "box") then
+            return true
         end
     end
 
-    local altDrops = Workspace:FindFirstChild("Drops")
-    if altDrops and altDrops ~= drops then
-        for _, obj in ipairs(altDrops:GetChildren()) do
-            Farm.ProcessDrop(obj)
+    if Context.Settings.LootAll then
+        return true
+    end
+
+    local minTier = Context.Settings.MinLootTier or 6
+    return rarity >= minTier
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- ЧЕЛОВЕЧЕСКИЙ АВТОЛУТ: персонаж ХОДИТ к дропу ногами и подбирает
+-- ═══════════════════════════════════════════════════════════
+local CurrentLootTarget = nil -- объект к которому идём
+
+function Farm.FindBestLootTarget()
+    local root = GetRootPart()
+    if not root then return nil end
+
+    local maxRadius = Context.Settings.LootRadius or 60.0
+    local bestDrop = nil
+    local bestDist = maxRadius
+
+    local function ScanFolder(folder)
+        if not folder then return end
+        for _, obj in ipairs(folder:GetChildren()) do
+            if obj and obj.Parent then
+                local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
+                if part then
+                    local dist = (part.Position - root.Position).Magnitude
+                    if dist <= maxRadius and dist < bestDist then
+                        if IsDropAllowed(obj) then
+                            bestDist = dist
+                            bestDrop = obj
+                        end
+                    end
+                end
+            end
         end
     end
+
+    ScanFolder(Workspace:FindFirstChild("DropsClient"))
+    ScanFolder(Workspace:FindFirstChild("Drops"))
+
+    return bestDrop
+end
+
+-- Подойти к дропу ногами и подобрать
+function Farm.WalkToAndPickupDrop(dropObj)
+    if not dropObj or not dropObj.Parent then return false end
+
+    local root = GetRootPart()
+    local hum = GetHumanoid()
+    if not root or not hum then return false end
+
+    local part = dropObj:IsA("BasePart") and dropObj or dropObj:FindFirstChildWhichIsA("BasePart", true)
+    if not part then return false end
+
+    local dropPos = part.Position
+    local dist = (Vector3.new(dropPos.X, 0, dropPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
+
+    -- Если дроп достаточно близко (< 12 studs) — просто подбираем
+    if dist < 12 then
+        FirePickup(dropObj)
+        return true
+    end
+
+    -- Идём к дропу ногами по земле
+    local groundTarget = GetGroundPosition(dropPos.X, dropPos.Z)
+    hum:MoveTo(groundTarget)
+
+    -- Ждём пока дойдём (максимум 4 секунды)
+    local startWalk = os.clock()
+    while Context.Running and Context.Settings.AutoLoot and dropObj and dropObj.Parent do
+        local currentRoot = GetRootPart()
+        if not currentRoot then break end
+
+        local currentDist = (Vector3.new(dropPos.X, 0, dropPos.Z) - Vector3.new(currentRoot.Position.X, 0, currentRoot.Position.Z)).Magnitude
+        if currentDist < 12 then
+            -- Дошли! Подбираем
+            FirePickup(dropObj)
+            return true
+        end
+
+        -- Таймаут
+        if (os.clock() - startWalk) > 4 then
+            break
+        end
+
+        -- Переобновляем MoveTo каждые 0.5 сек (если дроп двигался)
+        if dropObj and dropObj.Parent then
+            local newPart = dropObj:IsA("BasePart") and dropObj or dropObj:FindFirstChildWhichIsA("BasePart", true)
+            if newPart then
+                local newGround = GetGroundPosition(newPart.Position.X, newPart.Position.Z)
+                hum:MoveTo(newGround)
+            end
+        end
+
+        -- Ground enforcement во время ходьбы
+        EnforceGroundState()
+
+        task.wait(0.15)
+    end
+
+    return false
 end
 
 -- Поиск цели ТОЛЬКО в радиусе maxDistance (по умолчанию 45 studs)
--- Если моб дальше 45 studs — функция вернет nil, и бот не будет бить воздух!
 function Farm.GetTargetEnemy(maxDistance)
     maxDistance = maxDistance or Context.Settings.MaxTargetRange or 45.0
 
@@ -450,26 +540,23 @@ local LastSkill1Time = 0
 local LastSkill2Time = 0
 local LastSkill3Time = 0
 
--- 100% Естественная ходьба ногами по земле (БЕЗ парения, БЕЗ рывков в воздух)
+-- 100% Естественная ходьба ногами по земле к врагу и бой
 function Farm.AttackTargetLegit(target)
     local root = GetRootPart()
     local hum = GetHumanoid()
     if not root or not hum or not target or not target.Root or target.Hum.Health <= 0 then return end
 
-    -- Всегда гарантируем прямое стояние на двух ногах
-    if hum.PlatformStand then hum.PlatformStand = false end
-    if hum.Sit then hum.Sit = false end
-    hum.AutoRotate = true
+    EnforceGroundState()
 
     local myPos = root.Position
     local targetPos = target.Root.Position
-    local toTarget = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
-    local dist = toTarget.Magnitude
+    local flatDelta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
+    local dist = flatDelta.Magnitude
 
-    -- 1. Failsafe отхила: отбегаем назад по земле, если HP < 30%
+    -- 1. Failsafe: отбегаем назад по земле, если HP < 30%
     if Context.Settings.SmartHeal and hum.Health > 0 and (hum.Health / hum.MaxHealth) < 0.30 then
         if dist > 0.1 then
-            local retreatPos = Vector3.new(myPos.X - toTarget.Unit.X * 18, myPos.Y, myPos.Z - toTarget.Unit.Z * 18)
+            local retreatPos = GetGroundPosition(myPos.X - flatDelta.Unit.X * 18, myPos.Z - flatDelta.Unit.Z * 18)
             hum:MoveTo(retreatPos)
         end
         task.wait(0.25)
@@ -478,21 +565,19 @@ function Farm.AttackTargetLegit(target)
 
     local desiredDist = Context.Settings.CombatDistance or 8.0
 
-    -- 2. Естественное перемещение ногами по земле к мобу (высота строго на уровне пола!)
+    -- 2. Движение ногами к мобу (по ЗЕМЛЕ через Raycast!)
     if dist > desiredDist + 1.5 then
-        -- Идем шагами по земле к врагу:
-        local groundTarget = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
-        hum:MoveTo(groundTarget)
+        -- Идём к врагу — цель на ЗЕМЛЕ
+        local walkTarget = GetGroundPosition(targetPos.X, targetPos.Z)
+        hum:MoveTo(walkTarget)
     elseif dist < desiredDist - 2.5 then
-        -- Моб подошел слишком близко: делаем пару шагов назад
-        local stepBack = Vector3.new(myPos.X - toTarget.Unit.X * 3.0, myPos.Y, myPos.Z - toTarget.Unit.Z * 3.0)
+        -- Отходим назад
+        local stepBack = GetGroundPosition(myPos.X - flatDelta.Unit.X * 3.0, myPos.Z - flatDelta.Unit.Z * 3.0)
         hum:MoveTo(stepBack)
-    else
-        -- На дистанции удара: стоим твердо на ногах (не скользим!)
-        hum:Move(Vector3.zero, false)
     end
+    -- На дистанции удара: НЕ вызываем Move/MoveTo — Humanoid сам остановится
 
-    -- 3. Натуральная атака мечом (рубим стоя на ногах)
+    -- 3. Атака
     local now = os.clock()
     if (now - LastAttackTime) >= (Context.Settings.SwingDelay or 0.14) then
         LastAttackTime = now
@@ -501,87 +586,57 @@ function Farm.AttackTargetLegit(target)
         end)
     end
 
-    -- Навыки по своим таймингам
+    -- Навыки по таймерам
     if (now - LastSkill1Time) >= 3.5 then
         LastSkill1Time = now
-        pcall(function()
-            SkillInput.Press(Enums.SkillSlot.Skill1)
-        end)
+        pcall(function() SkillInput.Press(Enums.SkillSlot.Skill1) end)
     end
 
     if (now - LastSkill2Time) >= 4.8 then
         LastSkill2Time = now
-        pcall(function()
-            SkillInput.Press(Enums.SkillSlot.Skill2)
-        end)
+        pcall(function() SkillInput.Press(Enums.SkillSlot.Skill2) end)
     end
 
     if (now - LastSkill3Time) >= 6.5 then
         LastSkill3Time = now
-        pcall(function()
-            SkillInput.Press(Enums.SkillSlot.Skill3)
-        end)
+        pcall(function() SkillInput.Press(Enums.SkillSlot.Skill3) end)
     end
 
-    -- Рывок Dash ТОЛЬКО если включен вручную (по умолчанию выключен, чтобы не бросать в воздух)
+    -- Dash только если включён вручную
     if Context.Settings.AutoDash and (now - Context.LastDashTime) >= 5.0 then
         Context.LastDashTime = now
-        pcall(function()
-            SkillInput.Press(Enums.SkillSlot.Dash)
-        end)
+        pcall(function() SkillInput.Press(Enums.SkillSlot.Dash) end)
     end
 end
 
--- ЕСТЕСТВЕННЫЙ БЕГ ВПЕРЁД ПО ДОРОЖКЕ (ноги двигаются, персонаж шагает по земле)
+-- ЕСТЕСТВЕННЫЙ БЕГ ВПЕРЁД ПО ДОРОЖКЕ
 function Farm.WalkForward()
     local root = GetRootPart()
     local hum = GetHumanoid()
     if not root or not hum then return end
 
-    if hum.PlatformStand then hum.PlatformStand = false end
-    if hum.Sit then hum.Sit = false end
-    hum.AutoRotate = true
+    EnforceGroundState()
 
-    local currentPos = root.Position
-    -- Точка шага строго впереди на уровне пола дорожки (-Z)
-    local nextPoint = Vector3.new(-1.2, currentPos.Y, currentPos.Z - 28)
+    -- Точка шага по коридору (-Z направление), Y через Raycast
+    local nextZ = root.Position.Z - 28
+    local nextPoint = GetGroundPosition(-1.2, nextZ)
 
     hum:MoveTo(nextPoint)
 
-    -- Прыжок ТОЛЬКО если персонаж застрял в бордюре или ступеньке
-    if root.Velocity.Magnitude < 0.5 and hum.FloorMaterial ~= Enum.Material.Air then
-        hum.Jump = true
+    -- Прыжок ТОЛЬКО если застрял (скорость ~0 и есть пол)
+    if root.AssemblyLinearVelocity.Magnitude < 0.5 and hum.FloorMaterial ~= Enum.Material.Air then
+        task.wait(0.3)
+        if root.AssemblyLinearVelocity.Magnitude < 0.5 then
+            hum.Jump = true
+        end
     end
 end
 
--- 6. СЛУЖЕБНЫЕ ХУКИ И ИНСТАНТ-СБОР ЛУТА (ChildAdded Event)
+-- 6. СЛУЖЕБНЫЕ ХУКИ
 TrackConnection(LocalPlayer.Idled:Connect(function()
     if Context.Settings.AntiAFK then
         VirtualUser:CaptureController()
         VirtualUser:ClickButton2(Vector2.new(0, 0))
-    end
-end))
-
-local function HookDropsFolder(folder)
-    if not folder then return end
-    TrackConnection(folder.ChildAdded:Connect(function(child)
-        if Context.Settings.AutoLoot then
-            task.defer(function()
-                task.wait(0.04)
-                Farm.ProcessDrop(child)
-            end)
-        end
-    end))
-end
-
-local existingDrops = Workspace:FindFirstChild("DropsClient")
-if existingDrops then
-    HookDropsFolder(existingDrops)
-end
-
-TrackConnection(Workspace.ChildAdded:Connect(function(child)
-    if child.Name == "DropsClient" or child.Name == "Drops" then
-        HookDropsFolder(child)
     end
 end))
 
@@ -607,7 +662,7 @@ local function SendWebhook()
                 { name = "🔄 Перерождения", value = "`" .. tostring(stats.Rebirth) .. "`", inline = true },
                 { name = "💰 Монеты", value = "`" .. tostring(stats.Coins) .. "`", inline = true },
                 { name = "🗺️ Макс. Этап", value = "`Stage " .. tostring(stats.CareerMaxStage) .. "`", inline = true },
-                { name = "🛡️ Режим боя", value = "🟢 Ground Corridor Runner", inline = true }
+                { name = "🛡️ Режим боя", value = "🟢 Ground Walker v3.0", inline = true }
             },
             footer = { text = "Sword Loot Monarch • by Ryomotik" },
             timestamp = DateTime.now():ToIsoDate()
@@ -624,8 +679,19 @@ local function SendWebhook()
     end)
 end
 
--- 8. ГЛАВНЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ ЦИКЛ
--- Поток тренировки силы (если включен ручной режим свинга)
+-- 8. ГЛАВНЫЕ ПОТОКИ
+
+-- Фоновый поток: Ground Enforcement (каждые 0.2 сек)
+SpawnThread(function()
+    while Context.Running do
+        if Context.Settings.AutoStageRun or Context.Settings.AutoMobs then
+            EnforceGroundState()
+        end
+        task.wait(0.2)
+    end
+end)
+
+-- Поток тренировки силы
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoSwing and not Context.Settings.AutoStageRun and not Context.Settings.AutoMobs then
@@ -637,24 +703,20 @@ SpawnThread(function()
     end
 end)
 
--- ГЛАВНЫЙ ПОТОК: Идти вперед -> Увидел моба рядом (<45 studs) -> Убил -> Пошел дальше
+-- ГЛАВНЫЙ ПОТОК: Идти вперёд -> Увидел моба рядом -> Убил -> Пошел дальше
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoStageRun or Context.Settings.AutoMobs then
-            -- Проверяем мобов ТОЛЬКО рядом (в радиусе 45 studs)!
             local target = Farm.GetTargetEnemy(Context.Settings.MaxTargetRange or 45.0)
 
             if target then
-                -- Рядом есть враг: дерёмся
                 Farm.AttackTargetLegit(target)
                 task.wait(Context.Settings.SwingDelay)
             else
-                -- Врагов рядом НЕТ: НЕ используем скилы в пустоту, а ПРОСТО ИДЁМ ВПЕРЁД!
                 if Context.Settings.AutoStageRun then
                     Farm.WalkForward()
-                    Farm.CollectLoot()
                 end
-                task.wait(0.3) -- Пауза дает анимации ног полностью воспроизвести шаги без скольжения
+                task.wait(0.35)
             end
         else
             task.wait(0.3)
@@ -662,11 +724,41 @@ SpawnThread(function()
     end
 end)
 
--- Поток подбора лута
+-- Поток автолута: человеческий подход и подбор
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoLoot then
-            Farm.CollectLoot()
+            -- Если не в бою и не в режиме бега — ищем дроп и идём к нему
+            local isInCombat = (Context.Settings.AutoStageRun or Context.Settings.AutoMobs) and Farm.GetTargetEnemy(Context.Settings.MaxTargetRange) ~= nil
+
+            if not isInCombat then
+                local dropObj = Farm.FindBestLootTarget()
+                if dropObj then
+                    Farm.WalkToAndPickupDrop(dropObj)
+                end
+            else
+                -- В бою: подбираем только близлежащие дропы (< 15 studs) без ходьбы
+                local root = GetRootPart()
+                if root then
+                    local function QuickPickNearby(folder)
+                        if not folder then return end
+                        for _, obj in ipairs(folder:GetChildren()) do
+                            if obj and obj.Parent and IsDropAllowed(obj) then
+                                local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
+                                if part then
+                                    local dist = (part.Position - root.Position).Magnitude
+                                    if dist < 15 then
+                                        FirePickup(obj)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    QuickPickNearby(Workspace:FindFirstChild("DropsClient"))
+                    QuickPickNearby(Workspace:FindFirstChild("Drops"))
+                end
+            end
+
             task.wait(Context.Settings.LootInterval)
         else
             task.wait(1.5)
@@ -715,7 +807,7 @@ local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Ryomotik • v2.9 Natural Walker",
+    SubTitle = "by Ryomotik • v3.0 Ground Walker",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -724,10 +816,87 @@ local Window = Fluent:CreateWindow({
 })
 Fluent:SetTheme("Amethyst")
 
+-- Драг окна — ищем GUI через gethui и делаем основной фрейм перетаскиваемым
 task.defer(function()
     pcall(function()
-        task.wait(0.2)
-        SetupWindowDragging(Window)
+        task.wait(0.5) -- Ждём полной инициализации Fluent
+
+        -- Находим GUI Fluent окна
+        local gui = nil
+        if gethui then
+            for _, v in ipairs(gethui():GetChildren()) do
+                if v:IsA("ScreenGui") and v:FindFirstChild("Main", true) then
+                    gui = v
+                    break
+                end
+            end
+        end
+        if not gui then
+            gui = game:GetService("CoreGui"):FindFirstChildOfClass("ScreenGui")
+        end
+        if not gui then return end
+
+        -- Находим основной фрейм окна
+        local mainFrame = gui:FindFirstChild("Main", true)
+        if not mainFrame then
+            mainFrame = gui:FindFirstChildWhichIsA("Frame", true)
+        end
+        if not mainFrame or not mainFrame:IsA("GuiObject") then return end
+
+        -- Ищем TitleBar для привязки перетаскивания
+        local dragHandle = mainFrame:FindFirstChild("TitleBar", true)
+        if not dragHandle then
+            -- Ищем верхний бар
+            for _, child in ipairs(mainFrame:GetDescendants()) do
+                if child:IsA("Frame") and child.AbsoluteSize.Y < 50 and child.AbsoluteSize.Y > 20 then
+                    dragHandle = child
+                    break
+                end
+            end
+        end
+        if not dragHandle then
+            dragHandle = mainFrame
+        end
+
+        dragHandle.Active = true
+
+        local dragging = false
+        local dragStartPos = nil
+        local frameStartPos = nil
+
+        TrackConnection(dragHandle.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                dragStartPos = input.Position
+                frameStartPos = mainFrame.Position
+
+                local endConn
+                endConn = input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then
+                        dragging = false
+                        if endConn then endConn:Disconnect() end
+                    end
+                end)
+            end
+        end))
+
+        TrackConnection(UserInputService.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                local delta = input.Position - dragStartPos
+                mainFrame.Position = UDim2.new(
+                    frameStartPos.X.Scale,
+                    frameStartPos.X.Offset + delta.X,
+                    frameStartPos.Y.Scale,
+                    frameStartPos.Y.Offset + delta.Y
+                )
+            end
+        end))
+
+        TrackConnection(UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = false
+            end
+        end))
     end)
 end)
 
@@ -763,7 +932,7 @@ ToggleStageRun:OnChanged(function(val)
     if val then
         Fluent:Notify({
             Title = "Этапы",
-            Content = "Запущен режим коридорного бега: идёт вперёд, зачищает мобов и идёт дальше!",
+            Content = "Коридорный бег запущен! Персонаж идёт ногами, зачищает мобов и идёт дальше.",
             Duration = 3.5
         })
     end
@@ -805,9 +974,9 @@ local ToggleHeal = Tabs.Stages:AddToggle("SmartHeal", {
 })
 ToggleHeal:OnChanged(function(val) Context.Settings.SmartHeal = val end)
 
--- Вкладка 3: Фильтр и Вакуум Лута
+-- Вкладка 3: Фильтр Лута
 local ToggleLoot = Tabs.Loot:AddToggle("AutoLoot", {
-    Title = "⚡ Авто-сбор лута (Инстант подбор)",
+    Title = "⚡ Авто-сбор лута (Человеческий подход)",
     Default = true
 })
 ToggleLoot:OnChanged(function(val) Context.Settings.AutoLoot = val end)
@@ -861,25 +1030,19 @@ DropdownLoot:OnChanged(function(val)
     })
 end)
 
-local ToggleMagnet = Tabs.Loot:AddToggle("LootMagnet", {
-    Title = "🧲 Вакуум / Магнит дропов прямо к персонажу",
-    Default = true
-})
-ToggleMagnet:OnChanged(function(val) Context.Settings.LootMagnet = val end)
-
 Tabs.Loot:AddSlider("LootRadius", {
     Title = "Радиус захвата лута (Studs)",
-    Default = 85.0,
-    Min = 30.0,
-    Max = 200.0,
+    Default = 60.0,
+    Min = 15.0,
+    Max = 150.0,
     Rounding = 0,
     Callback = function(val) Context.Settings.LootRadius = val end
 })
 
 Tabs.Loot:AddSlider("LootInterval", {
     Title = "Частота проверки лута (сек)",
-    Default = 0.2,
-    Min = 0.05,
+    Default = 0.3,
+    Min = 0.1,
     Max = 1.0,
     Rounding = 2,
     Callback = function(val) Context.Settings.LootInterval = val end
@@ -975,6 +1138,6 @@ end
 Window:SelectTab(2)
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "v2.9 Natural Walker загружен! Автор: Ryomotik. Меню: LeftControl.",
+    Content = "v3.0 Ground Walker загружен! Автор: Ryomotik. Меню: LeftControl.",
     Duration = 4
 })
