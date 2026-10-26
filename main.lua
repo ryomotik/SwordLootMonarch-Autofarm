@@ -123,48 +123,62 @@ local function GetStats()
     return { Power = 0, Coins = 0, Rebirth = 0, Level = 1, CareerMaxStage = 1 }
 end
 
--- Плавное перетаскивание окна (Smooth Dragging)
-local function EnableSmoothDrag(frame, dragHandle)
-    dragHandle = dragHandle or frame
+-- Идеальное плавное перетаскивание окна (Fluent Window Dragging)
+local function SetupWindowDragging(win)
+    local rootFrame = win and (win.Root or win.Frame)
+    if not rootFrame then
+        local gui = (win and win.GUI) or Fluent.GUI or (gethui and gethui():FindFirstChildOfClass("ScreenGui"))
+        if gui then
+            rootFrame = gui:FindFirstChildWhichIsA("Frame", true)
+        end
+    end
+    if not rootFrame then return end
+
+    -- Перетаскивание привязано строго к заголовку (TitleBar), не ломая клики по кнопкам и вкладкам
+    local titleBar = (win and win.TitleBar and win.TitleBar.Frame) or rootFrame:FindFirstChild("TitleBar", true) or rootFrame:FindFirstChildWhichIsA("Frame")
+    if not titleBar then return end
+
+    titleBar.Active = true
+
     local dragging = false
-    local dragInput = nil
     local dragStart = nil
     local startPos = nil
 
-    local function update(input)
-        local delta = input.Position - dragStart
-        local newPos = UDim2.new(
-            startPos.X.Scale,
-            startPos.X.Offset + delta.X,
-            startPos.Y.Scale,
-            startPos.Y.Offset + delta.Y
-        )
-        TweenService:Create(frame, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Position = newPos }):Play()
-    end
-
-    TrackConnection(dragHandle.InputBegan:Connect(function(input)
+    TrackConnection(titleBar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
             dragStart = input.Position
-            startPos = frame.Position
+            startPos = rootFrame.Position
 
-            input.Changed:Connect(function()
+            local endConn
+            endConn = input.Changed:Connect(function()
                 if input.UserInputState == Enum.UserInputState.End then
                     dragging = false
+                    if endConn then endConn:Disconnect() end
                 end
             end)
         end
     end))
 
-    TrackConnection(dragHandle.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-            dragInput = input
+    TrackConnection(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            local targetPos = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+            rootFrame.Position = targetPos
+            if win then
+                win.Position = targetPos
+            end
         end
     end))
 
-    TrackConnection(UserInputService.InputChanged:Connect(function(input)
-        if input == dragInput and dragging then
-            update(input)
+    TrackConnection(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
         end
     end))
 end
@@ -693,20 +707,8 @@ Fluent:SetTheme("Amethyst")
 
 task.defer(function()
     pcall(function()
-        if Window and Window.Frame then
-            Window.Frame.Active = true
-            EnableSmoothDrag(Window.Frame, Window.TopBar or Window.Frame)
-        end
-        local guiParent = (gethui and gethui()) or game:GetService("CoreGui")
-        for _, gui in ipairs(guiParent:GetChildren()) do
-            if gui:IsA("ScreenGui") and (string.find(gui.Name:lower(), "fluent") or gui:FindFirstChild("Main") or gui:FindFirstChild("Window")) then
-                local mainF = gui:FindFirstChild("Main") or gui:FindFirstChild("Window") or gui:FindFirstChildWhichIsA("Frame")
-                if mainF then
-                    mainF.Active = true
-                    EnableSmoothDrag(mainF, mainF:FindFirstChild("TopBar") or mainF:FindFirstChild("Header") or mainF)
-                end
-            end
-        end
+        task.wait(0.2)
+        SetupWindowDragging(Window)
     end)
 end)
 
