@@ -3,7 +3,7 @@
     🎮 Game: [+1 Sword Loot Monarch] (PlaceId: 93239606899307)
     ⚡ Engine: Fluent UI (Nord / Deep Sea Edition)
     👑 Authors: Abror & Antigravity
-    🔬 Architecture: Native Net & Protocol Integration (v2.2 Stages & Evasion)
+    🔬 Architecture: 100% Legit Ground Movement & Loot Filter (v2.3)
     ═══════════════════════════════════════════════════════════════
 ]]
 
@@ -38,7 +38,7 @@ local SkillInput = require(ClientScripts:WaitForChild("SkillInput", 15))
 
 local HttpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
 
--- 3. СОСТОЯНИЕ
+-- 3. СОСТОЯНИЕ СКРИПТА
 local Context = {
     Running = true,
     Connections = {},
@@ -52,8 +52,7 @@ local Context = {
         SwingDelay = 0.08,
         AutoStageRun = false,
         AutoMobs = false,
-        MobDistance = 5.5,
-        DodgeRadius = 7.0,
+        CombatDistance = 8.5,
         AutoDash = true,
         SmartHeal = true,
         AutoRebirth = false,
@@ -61,11 +60,12 @@ local Context = {
         AutoEquipBest = false,
         EquipInterval = 8.0,
         AutoLoot = true,
-        LootInterval = 1.0,
+        LootInterval = 0.8,
+        MinLootTier = 7, -- 6 = Mythic+, 7 = Выше мификов (Divine/Secret/Celestial+)
         AutoStage = true,
         StageInterval = 5.0,
         AntiAFK = true,
-        AutoReturn = true,
+        AutoReturn = false, -- Отключен агрессивный возврат чтобы избежать проверок античита
         FPSBoost = false,
         WebhookEnabled = false,
         WebhookURL = "",
@@ -73,6 +73,22 @@ local Context = {
     }
 }
 getgenv().SwordMonarchInstance = Context
+
+-- Таблица редкостей для фильтрации лута
+local RarityTiers = {
+    ["common"] = 1,
+    ["uncommon"] = 2,
+    ["rare"] = 3,
+    ["epic"] = 4,
+    ["legendary"] = 5,
+    ["mythic"] = 6,
+    ["divine"] = 7,
+    ["celestial"] = 8,
+    ["secret"] = 9,
+    ["monarch"] = 10,
+    ["godly"] = 11,
+    ["ancient"] = 12
+}
 
 -- 4. СЛУЖЕБНЫЕ ФУНКЦИИ
 local function TrackConnection(conn)
@@ -145,18 +161,81 @@ function Farm.Rebirth()
     end)
 end
 
--- Авто-сбор выпавшего лута и сундуков
+-- Установка серверного фильтра лута игры
+function Farm.ApplyNativeLootFilter(tier)
+    pcall(function()
+        Net.InvokeServer(Msg.SetLootFilter, tier)
+    end)
+end
+
+-- Проверка редкости выпавшего предмета перед подбором
+function Farm.IsLootAllowed(dropPart)
+    local minTier = Context.Settings.MinLootTier
+    if minTier <= 1 then return true end
+
+    -- 1. Проверка через атрибуты
+    local tierAttr = dropPart:GetAttribute("Rarity") or dropPart:GetAttribute("Tier")
+    if type(tierAttr) == "number" then
+        return tierAttr >= minTier
+    end
+
+    -- 2. Проверка через текст в ProximityPrompt
+    local prompt = dropPart:FindFirstChildOfClass("ProximityPrompt") or dropPart:FindFirstChild("PickupPrompt")
+    local text = prompt and (prompt.ObjectText .. " " .. prompt.ActionText) or dropPart.Name
+    local lowerText = string.lower(text)
+
+    for name, tier in pairs(RarityTiers) do
+        if string.find(lowerText, name) then
+            return tier >= minTier
+        end
+    end
+
+    -- 3. Проверка через цвет светового луча дропа (LootBeam)
+    local beam = dropPart:FindFirstChildOfClass("Beam") or dropPart:FindFirstChild("LootBeam")
+    if beam and beam.Color and #beam.Color.Keypoints > 0 then
+        local col = beam.Color.Keypoints[1].Value
+        local isMythic = (col.R > 0.75 and col.G < 0.35 and col.B < 0.35)
+        local isAboveMythic = (col.R > 0.65 and col.B > 0.65) or (col.G > 0.75 and col.B > 0.75) or (col.R > 0.85 and col.G > 0.85 and col.B > 0.85)
+
+        if minTier > 6 then
+            return isAboveMythic
+        elseif minTier == 6 then
+            return isMythic or isAboveMythic
+        end
+    end
+
+    -- Сундуки боссов и реликвии всегда ценны
+    if string.find(lowerText, "boss") or string.find(lowerText, "chest") or string.find(lowerText, "curse") then
+        return true
+    end
+
+    return false
+end
+
+-- Умный сбор лута (Фильтрация: выше мификов)
 function Farm.CollectLoot()
     local drops = Workspace:FindFirstChild("DropsClient")
     if not drops then return end
+
+    local root = GetRootPart()
+    if not root then return end
+
     for _, desc in ipairs(drops:GetDescendants()) do
         if desc:IsA("ProximityPrompt") then
-            pcall(fireproximityprompt, desc)
+            local part = desc.Parent
+            if part and part:IsA("BasePart") then
+                local dist = (part.Position - root.Position).Magnitude
+                if dist < 50 then
+                    if Farm.IsLootAllowed(part) then
+                        pcall(fireproximityprompt, desc)
+                    end
+                end
+            end
         end
     end
 end
 
--- Авто-переход в максимальную открытую зону
+-- Авто-переход на следующий этап
 function Farm.TeleportMaxStage()
     local stats = GetStats()
     if stats.Stage and stats.Stage > 0 then
@@ -193,43 +272,59 @@ function Farm.GetTargetEnemy()
     return bestTarget
 end
 
--- Атака моба с круговым уворотом (Orbital Evasion) и дэшем
-function Farm.AttackTargetWithEvasion(target)
+-- 100% ЛЕГИТИМНЫЙ БОЙ НА ЗЕМЛЕ (Без полёта, без телепортов, без приклеивания)
+function Farm.AttackTargetLegit(target)
     local root = GetRootPart()
     local hum = GetHumanoid()
-    if not root or not target or not target.Root or target.Hum.Health <= 0 then return end
+    if not root or not hum or not target or not target.Root or target.Hum.Health <= 0 then return end
 
-    -- 1. Безопасный откат при критическом здоровье (<35% HP)
-    if Context.Settings.SmartHeal and hum and hum.Health > 0 and (hum.Health / hum.MaxHealth) < 0.35 then
-        local safeSpot = target.Root.CFrame * CFrame.new(0, 14, 22)
-        root.CFrame = safeSpot
-        root.Velocity = Vector3.zero
-        task.wait(0.4)
+    local myPos = root.Position
+    local targetPos = target.Root.Position
+    local toTarget = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
+    local dist = toTarget.Magnitude
+
+    -- 1. Безопасный откат при низком здоровье (<35% HP)
+    if Context.Settings.SmartHeal and hum.Health > 0 and (hum.Health / hum.MaxHealth) < 0.35 then
+        if dist > 0.1 then
+            local runAwayPos = myPos - toTarget.Unit * 25
+            hum:MoveTo(runAwayPos)
+        end
+        task.wait(0.3)
         return
     end
 
-    -- 2. Динамический круговой стрейф вокруг моба
-    local angle = (os.clock() * 3.2)
-    local radius = Context.Settings.DodgeRadius or 7.0
-    local height = Context.Settings.MobDistance or 5.5
+    local desiredDist = Context.Settings.CombatDistance or 8.5
 
-    local offsetX = math.cos(angle) * radius
-    local offsetZ = math.sin(angle) * radius
+    -- 2. Естественное перемещение по земле ногами
+    if dist > desiredDist + 3 then
+        -- Подбегаем к мобу ногами
+        hum:MoveTo(targetPos)
+    elseif dist < desiredDist - 2 then
+        -- Слегка отходим назад если моб наступает
+        local backPos = myPos - toTarget.Unit * 3
+        hum:MoveTo(backPos)
+    else
+        -- На боевой дистанции: стрейф влево-вправо по земле
+        local perp = Vector3.new(-toTarget.Z, 0, toTarget.X).Unit
+        local strafeDir = math.sin(os.clock() * 2.8)
+        local strafePos = targetPos + (toTarget.Unit * desiredDist) + (perp * strafeDir * 5)
+        hum:MoveTo(strafePos)
+    end
 
-    local targetPos = target.Root.Position + Vector3.new(offsetX, height, offsetZ)
-    root.CFrame = CFrame.lookAt(targetPos, target.Root.Position)
-    root.Velocity = Vector3.zero
+    -- 3. Плавный поворот лицом к врагу (Строго по горизонтали, Y не меняется!)
+    local lookTarget = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
+    root.CFrame = CFrame.lookAt(myPos, lookTarget)
 
-    -- 3. Нативный дэш для уклонения от сильных атак
+    -- 4. Нативный Dash на земле для сброса агро и уклонения
     local now = os.clock()
-    if Context.Settings.AutoDash and (now - Context.LastDashTime) > 2.8 then
+    if Context.Settings.AutoDash and (now - Context.LastDashTime) > 3.0 then
         Context.LastDashTime = now
         pcall(function()
             SkillInput.Press(Enums.SkillSlot.Dash)
         end)
     end
 
-    -- 4. Ротация всех скиллов и ударов
+    -- 5. Атака оружием и скиллами
     pcall(function()
         SkillInput.Press(Enums.SkillSlot.NormalAttack)
         SkillInput.Press(Enums.SkillSlot.Skill1)
@@ -238,13 +333,13 @@ function Farm.AttackTargetWithEvasion(target)
     end)
 end
 
--- Продвижение вперёд по этапу к воротам или следующей пачке мобов
+-- Естественный бег вперёд по этапу
 function Farm.AdvanceStageForward()
     local root = GetRootPart()
     local hum = GetHumanoid()
     if not root or not hum then return end
 
-    -- Поиск интерактивных ворот/портала этапа
+    -- Поиск интерактивных ворот/портала
     local portalPos = nil
     local portalNames = { "StageGate", "Portal", "StageTeleporter", "Gate", "Finish", "NextStage" }
     for _, name in ipairs(portalNames) do
@@ -261,7 +356,7 @@ function Farm.AdvanceStageForward()
     if portalPos then
         hum:MoveTo(portalPos)
     else
-        -- Движение вперёд по направлению коридора
+        -- Бег вперёд по направлению коридора
         local lookDir = root.CFrame.LookVector * Vector3.new(1, 0, 1)
         if lookDir.Magnitude > 0.05 then
             hum:MoveTo(root.Position + lookDir.Unit * 30)
@@ -269,7 +364,7 @@ function Farm.AdvanceStageForward()
     end
 end
 
--- 6. FAILSAFE И СИСТЕМА ВОЗВРАТА
+-- 6. СЛУЖЕБНЫЕ ХУКИ
 TrackConnection(LocalPlayer.Idled:Connect(function()
     if Context.Settings.AntiAFK then
         VirtualUser:CaptureController()
@@ -277,38 +372,14 @@ TrackConnection(LocalPlayer.Idled:Connect(function()
     end
 end))
 
-TrackConnection(LocalPlayer.CharacterAdded:Connect(function(newChar)
-    if not Context.Settings.AutoReturn then return end
-    local root = newChar:WaitForChild("HumanoidRootPart", 10)
-    if root and Context.LastFarmPosition then
-        task.wait(0.7)
-        root.CFrame = Context.LastFarmPosition
-        root.Velocity = Vector3.zero
-        if Context.Settings.AutoEquipBest then
-            task.wait(0.3)
-            Farm.EquipBest()
-        end
-    end
-end))
-
-TrackConnection(RunService.Heartbeat:Connect(function()
-    if Context.Settings.AutoReturn and Context.LastFarmPosition then
-        local root = GetRootPart()
-        if root and root.Position.Y < (Workspace.FallenPartsDestroyHeight + 40) then
-            root.Velocity = Vector3.zero
-            root.CFrame = Context.LastFarmPosition
-        end
-    end
-end))
-
--- Перехват события StageCleared для автоматического перехода на следующий этап
+-- Перехват StageCleared
 local function SetupGameEvents()
     local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
     local MainEvent = Remotes and Remotes:FindFirstChild("MainEvent")
     if MainEvent then
         TrackConnection(MainEvent.OnClientEvent:Connect(function(msgId, ...)
             if msgId == Msg.StageCleared then
-                task.delay(0.8, function()
+                task.delay(1.0, function()
                     Farm.CollectLoot()
                     if Context.Settings.AutoStage or Context.Settings.AutoStageRun then
                         task.wait(0.5)
@@ -320,6 +391,9 @@ local function SetupGameEvents()
     end
 end
 SetupGameEvents()
+
+-- Применение фильтра при запуске
+Farm.ApplyNativeLootFilter(Context.Settings.MinLootTier)
 
 -- 7. DISCORD WEBHOOK
 local function SendWebhook()
@@ -341,7 +415,7 @@ local function SendWebhook()
                 { name = "🔄 Перерождения", value = "`" .. tostring(stats.Rebirth) .. "`", inline = true },
                 { name = "💰 Монеты", value = "`" .. tostring(stats.Coins) .. "`", inline = true },
                 { name = "🗺️ Макс. Этап", value = "`Stage " .. tostring(stats.Stage) .. "`", inline = true },
-                { name = "🛡️ Режим боя", value = Context.Settings.AutoStageRun and "⚡ Stage Progression" or "🗡️ Normal Farm", inline = true }
+                { name = "🛡️ Режим боя", value = "🟢 100% Legit Ground (Anti-Kick)", inline = true }
             },
             footer = { text = "Sword Loot Monarch • by Abror" },
             timestamp = DateTime.now():ToIsoDate()
@@ -363,10 +437,6 @@ end
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoSwing and not Context.Settings.AutoStageRun and not Context.Settings.AutoMobs then
-            local root = GetRootPart()
-            if root and not Context.LastFarmPosition then
-                Context.LastFarmPosition = root.CFrame
-            end
             Farm.ClickTrain()
             task.wait(Context.Settings.SwingDelay)
         else
@@ -375,16 +445,15 @@ SpawnThread(function()
     end
 end)
 
--- Поток автопрохождения этапов, мобов и уворотов
+-- Поток легитимного боя и этапов
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoStageRun or Context.Settings.AutoMobs then
             local target = Farm.GetTargetEnemy()
             if target then
-                Farm.AttackTargetWithEvasion(target)
+                Farm.AttackTargetLegit(target)
                 task.wait(Context.Settings.SwingDelay)
             else
-                -- Если все мобы в зоне зачищены
                 if Context.Settings.AutoStageRun then
                     Farm.AdvanceStageForward()
                     Farm.CollectLoot()
@@ -403,7 +472,7 @@ SpawnThread(function()
     end
 end)
 
--- Поток сбора лута (Drops Magnet)
+-- Поток сбора лута с фильтрацией выше мификов
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoLoot then
@@ -456,7 +525,7 @@ local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Abror • v2.2 Stages",
+    SubTitle = "by Abror • v2.3 Legit Ground",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -467,6 +536,7 @@ local Window = Fluent:CreateWindow({
 local Tabs = {
     Main = Window:AddTab({ Title = "Фарм", Icon = "swords" }),
     Stages = Window:AddTab({ Title = "Этапы & Бой", Icon = "crosshair" }),
+    Loot = Window:AddTab({ Title = "Фильтр Лута", Icon = "shield" }),
     Progress = Window:AddTab({ Title = "Прокачка", Icon = "trending-up" }),
     Utility = Window:AddTab({ Title = "Сервис & AFK", Icon = "cpu" }),
     Webhook = Window:AddTab({ Title = "Discord", Icon = "bell" }),
@@ -475,94 +545,96 @@ local Tabs = {
 
 -- Вкладка 1: Основной фарм
 local ToggleSwing = Tabs.Main:AddToggle("AutoSwing", { Title = "Авто-клик / Тренировка силы (Native)", Default = false })
-ToggleSwing:OnChanged(function(val)
-    Context.Settings.AutoSwing = val
-    if val then
-        local root = GetRootPart()
-        if root then Context.LastFarmPosition = root.CFrame end
-        Fluent:Notify({ Title = "Фарм", Content = "Тренировка силы запущена через прямой Net-канал!", Duration = 3 })
-    end
-end)
+ToggleSwing:OnChanged(function(val) Context.Settings.AutoSwing = val end)
 
 Tabs.Main:AddSlider("SwingSpeed", {
     Title = "Задержка клика / атаки (сек)",
     Default = 0.08,
-    Min = 0.03,
+    Min = 0.04,
     Max = 0.5,
     Rounding = 2,
     Callback = function(val) Context.Settings.SwingDelay = val end
 })
 
-local ToggleLoot = Tabs.Main:AddToggle("AutoLoot", { Title = "Авто-сбор сундуков и дропа (Loot Magnet)", Default = true })
-ToggleLoot:OnChanged(function(val) Context.Settings.AutoLoot = val end)
-
-Tabs.Main:AddButton({
-    Title = "📍 Зафиксировать текущую позицию",
-    Description = "Обновляет точку для Failsafe возврата",
-    Callback = function()
-        local root = GetRootPart()
-        if root then
-            Context.LastFarmPosition = root.CFrame
-            Fluent:Notify({ Title = "Failsafe", Content = "Точка возврата успешно сохранена!", Duration = 3 })
-        end
-    end
-})
-
--- Вкладка 2: Прохождение Этапов и Уклонение
+-- Вкладка 2: Прохождение Этапов и Легитимный Бой
 local ToggleStageRun = Tabs.Stages:AddToggle("AutoStageRun", {
-    Title = "🚀 Автопрохождение этапов (Run, Dodge & Clear)",
+    Title = "🚀 Автопрохождение этапов (Легитимный бег по земле)",
     Default = false
 })
 ToggleStageRun:OnChanged(function(val)
     Context.Settings.AutoStageRun = val
     if val then
-        local root = GetRootPart()
-        if root then Context.LastFarmPosition = root.CFrame end
         Fluent:Notify({
-            Title = "Прохождение этапов",
-            Content = "Запущен цикл продвижения вперёд, зачистки волн и уклонения!",
+            Title = "Этапы",
+            Content = "Запущен легитимный наземный фарм без полётов и телепортов!",
             Duration = 3.5
         })
     end
 end)
 
 local ToggleMobs = Tabs.Stages:AddToggle("AutoMobs", {
-    Title = "Авто-фарм только ближайших мобов (без бега вперёд)",
+    Title = "Авто-фарм мобов (Наземный бой на дистанции)",
     Default = false
 })
 ToggleMobs:OnChanged(function(val) Context.Settings.AutoMobs = val end)
 
+Tabs.Stages:AddSlider("CombatDist", {
+    Title = "Дистанция удара мечом от моба (Studs)",
+    Default = 8.5,
+    Min = 6.0,
+    Max = 14.0,
+    Rounding = 1,
+    Callback = function(val) Context.Settings.CombatDistance = val end
+})
+
 local ToggleDash = Tabs.Stages:AddToggle("AutoDash", {
-    Title = "Использовать рывок (Dash) для уклонения",
+    Title = "Использовать рывок (Dash) на земле",
     Default = true
 })
 ToggleDash:OnChanged(function(val) Context.Settings.AutoDash = val end)
 
 local ToggleHeal = Tabs.Stages:AddToggle("SmartHeal", {
-    Title = "Безопасный откат при низком здоровье (<35% HP)",
+    Title = "Отбегать назад при низком HP (<35%)",
     Default = true
 })
 ToggleHeal:OnChanged(function(val) Context.Settings.SmartHeal = val end)
 
-Tabs.Stages:AddSlider("MobElevation", {
-    Title = "Высота зависания над мобом (Studs)",
-    Default = 5.5,
-    Min = 3.5,
-    Max = 12.0,
-    Rounding = 1,
-    Callback = function(val) Context.Settings.MobDistance = val end
+-- Вкладка 3: Фильтр Лута
+local DropdownLoot = Tabs.Loot:AddDropdown("LootFilterDropdown", {
+    Title = "Минимальная редкость сбора дропа",
+    Values = {
+        "Выше мификов (Divine / Secret / Celestial+)",
+        "Мифик и выше (Mythic+)",
+        "Легендарный и выше (Legendary+)",
+        "Собирать всё подряд (All Drops)"
+    },
+    Default = "Выше мификов (Divine / Secret / Celestial+)"
 })
+DropdownLoot:OnChanged(function(val)
+    if val == "Выше мификов (Divine / Secret / Celestial+)" then
+        Context.Settings.MinLootTier = 7
+    elseif val == "Мифик и выше (Mythic+)" then
+        Context.Settings.MinLootTier = 6
+    elseif val == "Легендарный и выше (Legendary+)" then
+        Context.Settings.MinLootTier = 5
+    else
+        Context.Settings.MinLootTier = 1
+    end
+    Farm.ApplyNativeLootFilter(Context.Settings.MinLootTier)
+    Fluent:Notify({
+        Title = "Фильтр дропа",
+        Content = "Установлен фильтр: " .. val,
+        Duration = 3
+    })
+end)
 
-Tabs.Stages:AddSlider("DodgeRadius", {
-    Title = "Радиус кругового стрейфа (Studs)",
-    Default = 7.0,
-    Min = 4.0,
-    Max = 14.0,
-    Rounding = 1,
-    Callback = function(val) Context.Settings.DodgeRadius = val end
+local ToggleLoot = Tabs.Loot:AddToggle("AutoLoot", {
+    Title = "Включить авто-сбор отфильтрованного лута",
+    Default = true
 })
+ToggleLoot:OnChanged(function(val) Context.Settings.AutoLoot = val end)
 
--- Вкладка 3: Прокачка
+-- Вкладка 4: Прокачка
 local ToggleRebirth = Tabs.Progress:AddToggle("AutoRebirth", { Title = "Авто-перерождение (PlayerRebirth)", Default = false })
 ToggleRebirth:OnChanged(function(val) Context.Settings.AutoRebirth = val end)
 
@@ -576,7 +648,7 @@ Tabs.Progress:AddButton({
     Title = "⚔️ Экипировать лучший меч сейчас",
     Callback = function()
         Farm.EquipBest()
-        Fluent:Notify({ Title = "Инвентарь", Content = "Команда InvEquipBest отправлена!", Duration = 2.5 })
+        Fluent:Notify({ Title = "Инвентарь", Content = "InvEquipBest выполнен!", Duration = 2.5 })
     end
 })
 
@@ -584,30 +656,22 @@ Tabs.Progress:AddButton({
     Title = "🔄 Сделать Rebirth сейчас",
     Callback = function()
         Farm.Rebirth()
-        Fluent:Notify({ Title = "Прокачка", Content = "Команда PlayerRebirth отправлена!", Duration = 2.5 })
+        Fluent:Notify({ Title = "Прокачка", Content = "PlayerRebirth выполнен!", Duration = 2.5 })
     end
 })
 
--- Вкладка 4: Сервис и AFK
+-- Вкладка 5: Сервис и AFK
 local ToggleAntiAFK = Tabs.Utility:AddToggle("AntiAFK", { Title = "Встроенный Anti-AFK (VirtualUser)", Default = true })
 ToggleAntiAFK:OnChanged(function(val) Context.Settings.AntiAFK = val end)
-
-local ToggleReturn = Tabs.Utility:AddToggle("AutoReturn", { Title = "Failsafe авто-возврат на точку", Default = true })
-ToggleReturn:OnChanged(function(val) Context.Settings.AutoReturn = val end)
 
 local ToggleFPS = Tabs.Utility:AddToggle("FPSBoost", { Title = "FPS Boost (Отключение 3D-рендеринга)", Default = false })
 ToggleFPS:OnChanged(function(val)
     Context.Settings.FPSBoost = val
     RunService:Set3dRenderingEnabled(not val)
     if val and setfpscap then setfpscap(15) elseif setfpscap then setfpscap(60) end
-    Fluent:Notify({
-        Title = "Оптимизация",
-        Content = val and "3D-рендеринг выключен для тихой работы в фоне." or "3D-рендеринг включен.",
-        Duration = 3
-    })
 end)
 
--- Вкладка 5: Discord Webhook
+-- Вкладка 6: Discord Webhook
 local ToggleWebhook = Tabs.Webhook:AddToggle("WebhookActive", { Title = "Включить отправку в Discord", Default = false })
 ToggleWebhook:OnChanged(function(val) Context.Settings.WebhookEnabled = val end)
 
@@ -615,18 +679,8 @@ Tabs.Webhook:AddInput("WebhookURL", {
     Title = "Webhook URL",
     Default = "",
     Placeholder = "https://discord.com/api/webhooks/...",
-    Numeric = false,
     Finished = true,
     Callback = function(val) Context.Settings.WebhookURL = val end
-})
-
-Tabs.Webhook:AddSlider("WebhookDelay", {
-    Title = "Интервал отчетов (секунды)",
-    Default = 300,
-    Min = 60,
-    Max = 1800,
-    Rounding = 0,
-    Callback = function(val) Context.Settings.WebhookInterval = val end
 })
 
 Tabs.Webhook:AddButton({
@@ -641,7 +695,7 @@ Tabs.Webhook:AddButton({
     end
 })
 
--- Вкладка 6: Настройки
+-- Вкладка 7: Настройки
 Tabs.Settings:AddKeybind("MenuBind", {
     Title = "Клавиша скрытия меню",
     Mode = "Toggle",
@@ -651,7 +705,6 @@ Tabs.Settings:AddKeybind("MenuBind", {
 
 Tabs.Settings:AddButton({
     Title = "🗑️ Полная выгрузка скрипта (Unload)",
-    Description = "Останавливает потоки и удаляет интерфейс",
     Callback = function()
         Context:Unload()
     end
@@ -671,9 +724,9 @@ function Context:Unload()
     print("[Sword Monarch]: Выгружен из памяти.")
 end
 
-Window:SelectTab(2) -- Сразу открываем вкладку «Этапы & Бой»
+Window:SelectTab(2)
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "v2.2 Stages & Evasion загружен! Автор: Abror. Меню: LeftControl.",
+    Content = "v2.3 Legit Ground загружен! Автор: Abror. Меню: LeftControl.",
     Duration = 4
 })
