@@ -724,32 +724,125 @@ SpawnThread(function()
     end
 end)
 
+-- ═══════════════════════════════════════════════════════════
+-- АВТО-ВОЗРОЖДЕНИЕ И ВХОД В ЭТАП (Бесконечный фарм без остановок)
+-- ═══════════════════════════════════════════════════════════
+local LastStageSpawnTime = 0
+
+function Farm.HandleDeathScreen()
+    local lp = LocalPlayer
+    local pg = lp:FindFirstChildOfClass("PlayerGui") or lp:FindFirstChild("PlayerGui")
+    if not pg then return false end
+
+    local handled = false
+
+    -- 1. DeathGui (Окно "Вы умерли" с серой кнопкой "Вернуться в город")
+    local deathGui = pg:FindFirstChild("DeathGui")
+    if deathGui and deathGui.Enabled then
+        local root = deathGui:FindFirstChild("Root")
+        local panel = root and root:FindFirstChild("Panel")
+        local ret = panel and panel:FindFirstChild("Return")
+        local btn = ret and ret:FindFirstChild("Btn")
+
+        if btn then
+            if firesignal then
+                pcall(function() firesignal(btn.Activated) end)
+                pcall(function() firesignal(btn.MouseButton1Click) end)
+            end
+            if getconnections then
+                pcall(function()
+                    for _, c in ipairs(getconnections(btn.Activated)) do
+                        if c.Fire then pcall(function() c:Fire() end)
+                        elseif c.Function then pcall(c.Function) end
+                    end
+                    for _, c in ipairs(getconnections(btn.MouseButton1Click)) do
+                        if c.Fire then pcall(function() c:Fire() end)
+                        elseif c.Function then pcall(c.Function) end
+                    end
+                end)
+            end
+            handled = true
+        end
+
+        pcall(function()
+            Net.FireServer(Msg.StageReturnTown)
+        end)
+    end
+
+    -- 2. Окно "Dead" (резервный экран)
+    local deadGui = pg:FindFirstChild("Dead")
+    if deadGui and deadGui.Enabled then
+        for _, desc in ipairs(deadGui:GetDescendants()) do
+            if desc:IsA("GuiButton") and (desc.Name == "Button" or desc.Name:find("Give")) then
+                if firesignal then pcall(function() firesignal(desc.MouseButton1Click) end) end
+                if getconnections then
+                    pcall(function()
+                        for _, c in ipairs(getconnections(desc.MouseButton1Click)) do
+                            if c.Fire then pcall(function() c:Fire() end)
+                            elseif c.Function then pcall(c.Function) end
+                        end
+                    end)
+                end
+                handled = true
+            end
+        end
+        pcall(function() Net.FireServer(Msg.StageReturnTown) end)
+    end
+
+    return handled
+end
+
+function Farm.CheckStageEntry()
+    if not Context.Settings.AutoStageRun then return end
+
+    local stage = LocalPlayer:GetAttribute("Stage")
+    -- Если stage == 0 или nil — персонаж находится в городе!
+    if stage == nil or stage == 0 then
+        local now = os.clock()
+        if (now - LastStageSpawnTime) >= 2.5 then
+            LastStageSpawnTime = now
+            local maxClear = LocalPlayer:GetAttribute("RunMaxClear") or 0
+            local targetStage = math.max(1, maxClear + 1)
+            pcall(function()
+                Net.FireServer(Msg.StageSpawnRequest, targetStage)
+            end)
+        end
+    end
+end
+
 -- ГЛАВНЫЙ ПОТОК: Единый цикл действий (Автолут > Бой > Коридор) — никаких конфликтов MoveTo!
 SpawnThread(function()
     while Context.Running do
-        if Context.Settings.AutoStageRun or Context.Settings.AutoMobs or Context.Settings.AutoLoot then
-            -- 1. ПРИОРИТЕТ 1: Человеческий автолут (персонаж лично идёт ногами к дропу > Legendary)
+        -- 0. ПРОВЕРКА СМЕРТИ: если открыт экран смерти — нажимаем серую кнопку "Вернуться в город"!
+        local isDead = Farm.HandleDeathScreen()
+
+        if isDead then
+            task.wait(1.0)
+        elseif Context.Settings.AutoStageRun or Context.Settings.AutoMobs or Context.Settings.AutoLoot then
+            -- 1. Если персонаж в городе — автоматически заходим на нужный этап!
+            Farm.CheckStageEntry()
+
+            -- 2. Человеческий визит к ценному дропу (Mythic+ / сундуки): подойти, постоять 1 сек и идти дальше
             local lootingActive = false
             if Context.Settings.AutoLoot then
                 lootingActive = Farm.ProcessLootStep()
             end
 
             if lootingActive then
-                -- Сейчас персонаж идёт или подбирает ценный дроп
-                task.wait(0.12)
+                task.wait(0.1)
             else
-                -- 2. ПРИОРИТЕТ 2: Бой (если есть враг в радиусе)
+                -- 3. Бой с мобами на пути
                 local target = (Context.Settings.AutoStageRun or Context.Settings.AutoMobs) and Farm.GetTargetEnemy(Context.Settings.MaxTargetRange or 45.0)
 
                 if target then
                     Farm.AttackTargetLegit(target)
                     task.wait(Context.Settings.SwingDelay)
                 else
-                    -- 3. ПРИОРИТЕТ 3: Движение вперёд по коридору
+                    -- 4. Бег вперёд по коридору к новым этапам
                     if Context.Settings.AutoStageRun then
                         Farm.WalkForward()
                     end
-                    task.wait(0.3)
+                    task.wait(0.25)
                 end
             end
         else
