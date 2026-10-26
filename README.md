@@ -18,7 +18,7 @@
 Скопируйте и вставьте строку в любой современный Luau-экзекутор (Wave, Synapse, Solara, Arceus, Delta, Fluxus и др.):
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/ryomotik/SwordLootMonarch-Autofarm/main/main.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/ryomotik/SwordLootMonarch-Autofarm/main/main.lua?v=" .. tostring(os.time()), true))()
 ```
 
 ---
