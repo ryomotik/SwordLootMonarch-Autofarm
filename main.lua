@@ -4,7 +4,7 @@
     ⚡ Engine: Fluent UI (Amethyst Purple Edition)
     👑 Author: Ryomotik
     🛠️ Co-Developer: Antigravity Automation
-    🔬 Version: v3.1 Ground Walker — Raycast Grounded Movement + Human Loot + Fixed Capability
+    🔬 Version: v3.2 Clean Farm — Single Unified Tab + Auto-Death Return + Walking Farm
     ═══════════════════════════════════════════════════════════════
 ]]
 
@@ -95,7 +95,7 @@ local Context = {
         SmartHeal = true,
         AutoRebirth = false,
         RebirthDelay = 2.0,
-        AutoEquipBest = false,
+        AutoEquipBest = true,
         EquipInterval = 8.0,
         AutoLoot = true,
         LootAll = false,
@@ -918,9 +918,9 @@ local Fluent = LoadFluent()
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Ryomotik • v3.1 Ground Walker",
-    TabWidth = 160,
-    Size = UDim2.fromOffset(580, 460),
+    SubTitle = "by Ryomotik • v3.2 Clean Farm",
+    TabWidth = 130,
+    Size = UDim2.fromOffset(520, 440),
     Acrylic = false,
     Theme = "Amethyst",
     MinimizeKey = Enum.KeyCode.LeftControl
@@ -928,30 +928,12 @@ local Window = Fluent:CreateWindow({
 Fluent:SetTheme("Amethyst")
 
 local Tabs = {
-    Main = Window:AddTab({ Title = "Фарм", Icon = "swords" }),
-    Stages = Window:AddTab({ Title = "Этапы & Бой", Icon = "crosshair" }),
-    Loot = Window:AddTab({ Title = "Фильтр Лута", Icon = "shield" }),
-    Progress = Window:AddTab({ Title = "Прокачка", Icon = "trending-up" }),
-    Utility = Window:AddTab({ Title = "Сервис & AFK", Icon = "cpu" }),
-    Webhook = Window:AddTab({ Title = "Discord", Icon = "bell" }),
-    Settings = Window:AddTab({ Title = "Конфиг", Icon = "settings" })
+    Main = Window:AddTab({ Title = "Фарм", Icon = "swords" })
 }
 
-local ToggleSwing = Tabs.Main:AddToggle("AutoSwing", { Title = "Авто-клик / Тренировка силы (Native)", Default = false })
-ToggleSwing:OnChanged(function(val) Context.Settings.AutoSwing = val end)
-
-Tabs.Main:AddSlider("SwingSpeed", {
-    Title = "Задержка клика / атаки (сек)",
-    Default = 0.08,
-    Min = 0.04,
-    Max = 0.5,
-    Rounding = 2,
-    Callback = function(val) Context.Settings.SwingDelay = val end
-})
-
--- Вкладка 2: Прохождение Этапов
-local ToggleStageRun = Tabs.Stages:AddToggle("AutoStageRun", {
-    Title = "🚀 Проход по локациям (Идти вперёд -> Убить мобов -> Дальше)",
+-- 1. ОСНОВНЫЕ ПЕРЕКЛЮЧАТЕЛИ ФАРМА
+local ToggleStageRun = Tabs.Main:AddToggle("AutoStageRun", {
+    Title = "🚀 Проход по локациям (Ходьба -> Зачистка -> Новые зоны)",
     Default = true
 })
 ToggleStageRun:OnChanged(function(val)
@@ -960,18 +942,45 @@ ToggleStageRun:OnChanged(function(val)
         Fluent:Notify({
             Title = "Этапы",
             Content = "Коридорный бег запущен! Персонаж идёт ногами, зачищает мобов и идёт дальше.",
-            Duration = 3.5
+            Duration = 3
         })
     end
 end)
 
-local ToggleMobs = Tabs.Stages:AddToggle("AutoMobs", {
-    Title = "Только бой с мобами рядом (без бега вперёд)",
+local ToggleSwing = Tabs.Main:AddToggle("AutoSwing", {
+    Title = "⚔️ Авто-клик / Тренировка силы (Native)",
     Default = false
 })
-ToggleMobs:OnChanged(function(val) Context.Settings.AutoMobs = val end)
+ToggleSwing:OnChanged(function(val)
+    Context.Settings.AutoSwing = val
+end)
 
-Tabs.Stages:AddSlider("CombatDist", {
+local ToggleLoot = Tabs.Main:AddToggle("AutoLoot", {
+    Title = "👣 Подходить к ценному дропу (Mythic+ / Сундуки)",
+    Default = true
+})
+ToggleLoot:OnChanged(function(val)
+    Context.Settings.AutoLoot = val
+end)
+
+local ToggleEquip = Tabs.Main:AddToggle("AutoEquip", {
+    Title = "👑 Авто-экипировка лучшего меча (InvEquipBest)",
+    Default = true
+})
+ToggleEquip:OnChanged(function(val)
+    Context.Settings.AutoEquipBest = val
+end)
+
+local ToggleRebirth = Tabs.Main:AddToggle("AutoRebirth", {
+    Title = "🔄 Авто-перерождение (PlayerRebirth)",
+    Default = false
+})
+ToggleRebirth:OnChanged(function(val)
+    Context.Settings.AutoRebirth = val
+end)
+
+-- 2. ТОЧНАЯ НАСТРОЙКА БОЯ И ЗАДЕРЖКИ
+Tabs.Main:AddSlider("CombatDist", {
     Title = "Дистанция удара мечом от моба (Studs)",
     Default = 8.0,
     Min = 5.0,
@@ -980,168 +989,24 @@ Tabs.Stages:AddSlider("CombatDist", {
     Callback = function(val) Context.Settings.CombatDistance = val end
 })
 
-Tabs.Stages:AddSlider("TargetRange", {
-    Title = "Радиус обнаружения врагов рядом (Studs)",
-    Default = 45.0,
-    Min = 20.0,
-    Max = 80.0,
-    Rounding = 0,
-    Callback = function(val) Context.Settings.MaxTargetRange = val end
-})
-
-local ToggleDash = Tabs.Stages:AddToggle("AutoDash", {
-    Title = "Рывок (Dash) в бою [Выкл = чистая ходьба ногами]",
-    Default = false
-})
-ToggleDash:OnChanged(function(val) Context.Settings.AutoDash = val end)
-
-local ToggleHeal = Tabs.Stages:AddToggle("SmartHeal", {
-    Title = "Отбегать назад при низком HP (<35%)",
-    Default = true
-})
-ToggleHeal:OnChanged(function(val) Context.Settings.SmartHeal = val end)
-
--- Вкладка 3: Фильтр Лута
-local ToggleLoot = Tabs.Loot:AddToggle("AutoLoot", {
-    Title = "👣 Подходить к ценному дропу (подождать 1 сек и идти дальше)",
-    Default = true
-})
-ToggleLoot:OnChanged(function(val) Context.Settings.AutoLoot = val end)
-
-local ToggleLootAll = Tabs.Loot:AddToggle("LootAll", {
-    Title = "🌟 Собирать абсолютно ВСЁ без фильтра (All Tiers)",
-    Default = false
-})
-ToggleLootAll:OnChanged(function(val)
-    Context.Settings.LootAll = val
-    if val then
-        Fluent:Notify({
-            Title = "Сбор лута",
-            Content = "Включен сбор абсолютно всех предметов без ограничений!",
-            Duration = 3
-        })
-    end
-end)
-
-local DropdownLoot = Tabs.Loot:AddDropdown("LootFilterDropdown", {
-    Title = "Минимальная редкость (если 'Всё' выключено)",
-    Values = {
-        "Мифик и выше (Mythic+) [Tier 6]",
-        "Строго выше мификов (Celestial+) [Tier 7]",
-        "Легендарный и выше (Legendary+) [Tier 5]",
-        "Эпический и выше (Epic+) [Tier 4]",
-        "Редкий и выше (Rare+) [Tier 3]",
-        "Обычный и выше (Common+ / Все) [Tier 1]"
-    },
-    Default = "Мифик и выше (Mythic+) [Tier 6]"
-})
-DropdownLoot:OnChanged(function(val)
-    if string.find(val, "Mythic+") then
-        Context.Settings.MinLootTier = 6
-    elseif string.find(val, "Celestial+") then
-        Context.Settings.MinLootTier = 7
-    elseif string.find(val, "Legendary+") then
-        Context.Settings.MinLootTier = 5
-    elseif string.find(val, "Epic+") then
-        Context.Settings.MinLootTier = 4
-    elseif string.find(val, "Rare+") then
-        Context.Settings.MinLootTier = 3
-    else
-        Context.Settings.MinLootTier = 1
-    end
-    Farm.ApplyNativeLootFilter(Context.Settings.MinLootTier)
-    Fluent:Notify({
-        Title = "Фильтр дропа",
-        Content = "Установлен порог редкости: " .. val,
-        Duration = 3
-    })
-end)
-
-Tabs.Loot:AddSlider("LootRadius", {
-    Title = "Радиус захвата лута (Studs)",
-    Default = 60.0,
-    Min = 15.0,
-    Max = 150.0,
-    Rounding = 0,
-    Callback = function(val) Context.Settings.LootRadius = val end
-})
-
-Tabs.Loot:AddSlider("LootInterval", {
-    Title = "Частота проверки лута (сек)",
-    Default = 0.3,
-    Min = 0.1,
-    Max = 1.0,
+Tabs.Main:AddSlider("SwingSpeed", {
+    Title = "Задержка клика / атаки (сек)",
+    Default = 0.24,
+    Min = 0.04,
+    Max = 0.5,
     Rounding = 2,
-    Callback = function(val) Context.Settings.LootInterval = val end
+    Callback = function(val) Context.Settings.SwingDelay = val end
 })
 
--- Вкладка 4: Прокачка
-local ToggleRebirth = Tabs.Progress:AddToggle("AutoRebirth", { Title = "Авто-перерождение (PlayerRebirth)", Default = false })
-ToggleRebirth:OnChanged(function(val) Context.Settings.AutoRebirth = val end)
-
-local ToggleEquip = Tabs.Progress:AddToggle("AutoEquip", { Title = "Авто-экипировка лучшего меча (InvEquipBest)", Default = false })
-ToggleEquip:OnChanged(function(val) Context.Settings.AutoEquipBest = val end)
-
-Tabs.Progress:AddButton({
-    Title = "⚔️ Экипировать лучший меч сейчас",
-    Callback = function()
-        Farm.EquipBest()
-        Fluent:Notify({ Title = "Инвентарь", Content = "InvEquipBest выполнен!", Duration = 2.5 })
-    end
-})
-
-Tabs.Progress:AddButton({
-    Title = "🔄 Сделать Rebirth сейчас",
-    Callback = function()
-        Farm.Rebirth()
-        Fluent:Notify({ Title = "Прокачка", Content = "PlayerRebirth выполнен!", Duration = 2.5 })
-    end
-})
-
--- Вкладка 5: Сервис и AFK
-local ToggleAntiAFK = Tabs.Utility:AddToggle("AntiAFK", { Title = "Встроенный Anti-AFK (VirtualUser)", Default = true })
-ToggleAntiAFK:OnChanged(function(val) Context.Settings.AntiAFK = val end)
-
-local ToggleFPS = Tabs.Utility:AddToggle("FPSBoost", { Title = "FPS Boost (Отключение 3D-рендеринга)", Default = false })
-ToggleFPS:OnChanged(function(val)
-    Context.Settings.FPSBoost = val
-    RunService:Set3dRenderingEnabled(not val)
-    if val and setfpscap then setfpscap(15) elseif setfpscap then setfpscap(60) end
-end)
-
--- Вкладка 6: Discord Webhook
-local ToggleWebhook = Tabs.Webhook:AddToggle("WebhookActive", { Title = "Включить отправку в Discord", Default = false })
-ToggleWebhook:OnChanged(function(val) Context.Settings.WebhookEnabled = val end)
-
-Tabs.Webhook:AddInput("WebhookURL", {
-    Title = "Webhook URL",
-    Default = "",
-    Placeholder = "https://discord.com/api/webhooks/...",
-    Finished = true,
-    Callback = function(val) Context.Settings.WebhookURL = val end
-})
-
-Tabs.Webhook:AddButton({
-    Title = "📡 Отправить тестовый отчет",
-    Callback = function()
-        if Context.Settings.WebhookURL ~= "" then
-            SendWebhook()
-            Fluent:Notify({ Title = "Webhook", Content = "Тестовый пакет отправлен в Discord!", Duration = 3 })
-        else
-            Fluent:Notify({ Title = "Ошибка", Content = "Сначала вставьте URL вебхука!", Duration = 3 })
-        end
-    end
-})
-
--- Вкладка 7: Настройки
-Tabs.Settings:AddKeybind("MenuBind", {
+-- 3. УПРАВЛЕНИЕ МЕНЮ И ВЫГРУЗКА
+Tabs.Main:AddKeybind("MenuBind", {
     Title = "Клавиша скрытия меню",
     Mode = "Toggle",
     Default = "LeftControl",
     Callback = function() end
 })
 
-Tabs.Settings:AddButton({
+Tabs.Main:AddButton({
     Title = "🗑️ Полная выгрузка скрипта (Unload)",
     Callback = function()
         Context:Unload()
@@ -1171,9 +1036,9 @@ function Context:Unload()
     print("[Sword Monarch]: Выгружен из памяти.")
 end
 
-Window:SelectTab(2)
+Window:SelectTab(1)
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "v3.1 Ground Walker загружен! Автор: Ryomotik. Меню: LeftControl.",
+    Content = "v3.2 Clean Farm загружен! Автор: Ryomotik. Меню: LeftControl.",
     Duration = 4
 })
