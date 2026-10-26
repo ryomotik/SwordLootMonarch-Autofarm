@@ -8,13 +8,49 @@
     ═══════════════════════════════════════════════════════════════
 ]]
 
--- 0. ПРЕДОТВРАЩЕНИЕ ДУБЛИРОВАНИЯ
+-- 0. ПРЕДОТВРАЩЕНИЕ ДУБЛИРОВАНИЯ И ОЧИСТКА СТАРЫХ МОТОРОВ
+if getgenv().__FluentActiveMotors then
+    for _, m in pairs(getgenv().__FluentActiveMotors) do
+        pcall(function() m:stop() end)
+    end
+    table.clear(getgenv().__FluentActiveMotors)
+end
+
 if getgenv().SwordMonarchInstance then
     pcall(function()
         getgenv().SwordMonarchInstance:Unload()
     end)
-    task.wait(0.3)
+    task.wait(0.2)
 end
+
+if getgenv().Fluent then
+    pcall(function() getgenv().Fluent:Destroy() end)
+    getgenv().Fluent = nil
+end
+
+local function CleanupOldGuis()
+    local lp = game:GetService('Players').LocalPlayer
+    if lp then
+        local pg = lp:FindFirstChild('PlayerGui')
+        if pg then
+            for _, child in ipairs(pg:GetChildren()) do
+                if child:IsA('ScreenGui') and (child.Name == 'SwordMonarchGui' or child.Name:find('ScreenGui') and child:FindFirstChild('AcrylicPaint', true)) then
+                    pcall(function() child:Destroy() end)
+                end
+            end
+        end
+    end
+    if gethui then
+        pcall(function()
+            for _, child in ipairs(gethui():GetChildren()) do
+                if child:IsA('ScreenGui') and (child.Name == 'SwordMonarchGui' or child.Name:find('ScreenGui') and child:FindFirstChild('AcrylicPaint', true)) then
+                    pcall(function() child:Destroy() end)
+                end
+            end
+        end)
+    end
+end
+CleanupOldGuis()
 
 -- 1. СЕРВИСЫ
 local Players = game:GetService("Players")
@@ -805,22 +841,31 @@ end)
 -- 9. FLUENT UI (Amethyst Purple Edition — With Capability & CoreGui Protection)
 local function LoadFluent()
     local fluentSource = nil
-    -- 1. Сначала пробуем загрузить пропатченную версию из нашего репозитория
+    -- 1. Сначала пробуем загрузить пропатченную версию из нашего репозитория с cache-buster
     pcall(function()
-        fluentSource = game:HttpGet("https://raw.githubusercontent.com/ryomotik/SwordLootMonarch-Autofarm/main/fluent.lua", true)
+        local url = "https://raw.githubusercontent.com/ryomotik/SwordLootMonarch-Autofarm/main/fluent.lua?v=" .. tostring(math.floor(os.time() / 60))
+        fluentSource = game:HttpGet(url, true)
     end)
+
+    if not fluentSource or #fluentSource < 1000 then
+        pcall(function()
+            fluentSource = game:HttpGet("https://raw.githubusercontent.com/ryomotik/SwordLootMonarch-Autofarm/main/fluent.lua", true)
+        end)
+    end
 
     -- 2. Если не вышло — качаем оригинал и патчим CoreGui на лету
     if not fluentSource or #fluentSource < 1000 then
         pcall(function()
             fluentSource = game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua", true)
-            if fluentSource then
-                fluentSource = fluentSource:gsub("game:GetService%s*['\"]CoreGui['\"]", "((gethui and gethui()) or game:GetService('Players').LocalPlayer:WaitForChild('PlayerGui'))")
-            end
         end)
     end
 
     if fluentSource and #fluentSource > 1000 then
+        -- Runtime-патч для 100% гарантии от Capability Plugin ошибки
+        fluentSource = fluentSource:gsub("protectgui%s*or%s*%(%s*syn%s*and%s*syn%.protect_gui%s*%)%s*or%s*function%(%)%s*end", "function()end")
+        fluentSource = fluentSource:gsub("v%(w%)", "--[[v(w)]]")
+        fluentSource = fluentSource:gsub("game:GetService%s*%(?%s*['\"]CoreGui['\"]%s*%)?", "game:GetService('Players').LocalPlayer:WaitForChild('PlayerGui')")
+
         local fn, loadErr = loadstring(fluentSource)
         if fn then
             local success, lib = pcall(fn)
@@ -1075,7 +1120,16 @@ function Context:Unload()
     table.clear(Context.Threads)
     RunService:Set3dRenderingEnabled(true)
     if setfpscap then setfpscap(60) end
-    pcall(function() Window:Destroy() end)
+    if Fluent then
+        pcall(function() Fluent:Destroy() end)
+    end
+    if getgenv().__FluentActiveMotors then
+        for _, m in pairs(getgenv().__FluentActiveMotors) do
+            pcall(function() m:stop() end)
+        end
+        table.clear(getgenv().__FluentActiveMotors)
+    end
+    CleanupOldGuis()
     getgenv().SwordMonarchInstance = nil
     print("[Sword Monarch]: Выгружен из памяти.")
 end
