@@ -834,9 +834,9 @@ end)
 -- 9. FLUENT UI (Amethyst Purple Edition — With Capability & CoreGui Protection)
 local function LoadFluent()
     local fluentSource = nil
-    -- 1. Сначала пробуем загрузить пропатченную версию из нашего репозитория с cache-buster
+    -- Загружаем пропатченную Fluent UI напрямую из репозитория
     pcall(function()
-        local url = "https://raw.githubusercontent.com/ryomotik/SwordLootMonarch-Autofarm/main/fluent.lua?v=" .. tostring(math.floor(os.time() / 60))
+        local url = "https://raw.githubusercontent.com/ryomotik/SwordLootMonarch-Autofarm/main/fluent.lua?v=" .. tostring(os.time())
         fluentSource = game:HttpGet(url, true)
     end)
 
@@ -846,19 +846,7 @@ local function LoadFluent()
         end)
     end
 
-    -- 2. Если не вышло — качаем оригинал и патчим CoreGui на лету
-    if not fluentSource or #fluentSource < 1000 then
-        pcall(function()
-            fluentSource = game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua", true)
-        end)
-    end
-
     if fluentSource and #fluentSource > 1000 then
-        -- Runtime-патч для 100% гарантии от Capability Plugin ошибки
-        fluentSource = fluentSource:gsub("protectgui%s*or%s*%(%s*syn%s*and%s*syn%.protect_gui%s*%)%s*or%s*function%(%)%s*end", "function()end")
-        fluentSource = fluentSource:gsub("v%(w%)", "--[[v(w)]]")
-        fluentSource = fluentSource:gsub("game:GetService%s*%(?%s*['\"]CoreGui['\"]%s*%)?", "game:GetService('Players').LocalPlayer:WaitForChild('PlayerGui')")
-
         local fn, loadErr = loadstring(fluentSource)
         if fn then
             local success, lib = pcall(fn)
