@@ -2,7 +2,7 @@
     ═══════════════════════════════════════════════════════════════
     ⚔️ [+1 Sword Loot Monarch] - Universal GitHub Loader
     👑 Author: Ryomotik
-    🔬 Version: v4.0 Ultimate Edition (Cache-Busting Enabled)
+    🔬 Version: v3.1 Ground Walker Edition (Cache-Busting Enabled)
     ═══════════════════════════════════════════════════════════════
 ]]
 
