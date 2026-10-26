@@ -34,12 +34,3 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/ryomotik/SwordLootMon
 
 ---
 
-## 📦 Как выгрузить в свой GitHub репозиторий
-
-Если репозиторий `SwordLootMonarch-Autofarm` создан на GitHub у пользователя `ryomotik`:
-
-```bash
-cd C:\Users\abror\.gemini\antigravity\scratch\SwordLootMonarch-Autofarm
-git remote add origin https://github.com/ryomotik/SwordLootMonarch-Autofarm.git
-git push -u origin main
-```
