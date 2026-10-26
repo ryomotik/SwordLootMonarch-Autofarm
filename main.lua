@@ -4,7 +4,7 @@
     ⚡ Engine: Fluent UI (Amethyst Purple Edition)
     👑 Author: Ryomotik
     🛠️ Co-Developer: Antigravity Automation
-    🔬 Version: v2.8 100% Ground Walking & Anti-Kick Protection (Zero Airborne / Rate-Limit Safe)
+    🔬 Version: v2.9 Natural Ground Walking & Footstep Navigation (Zero Air Diving / Pure Legs Movement)
     ═══════════════════════════════════════════════════════════════
 ]]
 
@@ -55,7 +55,7 @@ local Context = {
         AutoMobs = false,
         CombatDistance = 8.0,
         MaxTargetRange = 45.0, -- Только мобы в радиусе 45 studs! Никакого таргета за 300+ studs!
-        AutoDash = true,
+        AutoDash = false, -- Отключено по умолчанию для естественной ходьбы ногами
         SmartHeal = true,
         AutoRebirth = false,
         RebirthDelay = 2.0,
@@ -450,11 +450,16 @@ local LastSkill1Time = 0
 local LastSkill2Time = 0
 local LastSkill3Time = 0
 
--- 100% Наземный бой: строго по земле, НИКАКОГО парения в воздухе и zero root.CFrame overwrites!
+-- 100% Естественная ходьба ногами по земле (БЕЗ парения, БЕЗ рывков в воздух)
 function Farm.AttackTargetLegit(target)
     local root = GetRootPart()
     local hum = GetHumanoid()
     if not root or not hum or not target or not target.Root or target.Hum.Health <= 0 then return end
+
+    -- Всегда гарантируем прямое стояние на двух ногах
+    if hum.PlatformStand then hum.PlatformStand = false end
+    if hum.Sit then hum.Sit = false end
+    hum.AutoRotate = true
 
     local myPos = root.Position
     local targetPos = target.Root.Position
@@ -464,60 +469,62 @@ function Farm.AttackTargetLegit(target)
     -- 1. Failsafe отхила: отбегаем назад по земле, если HP < 30%
     if Context.Settings.SmartHeal and hum.Health > 0 and (hum.Health / hum.MaxHealth) < 0.30 then
         if dist > 0.1 then
-            local retreatPos = myPos - toTarget.Unit * 20
+            local retreatPos = Vector3.new(myPos.X - toTarget.Unit.X * 18, myPos.Y, myPos.Z - toTarget.Unit.Z * 18)
             hum:MoveTo(retreatPos)
         end
-        task.wait(0.2)
+        task.wait(0.25)
         return
     end
 
     local desiredDist = Context.Settings.CombatDistance or 8.0
 
-    -- 2. Наземное движение через Humanoid:MoveTo
-    -- НЕ ТРОГАЕМ root.CFrame! Физика Roblox держит ноги на земле 24/7!
-    if dist > desiredDist + 2.0 then
-        hum:MoveTo(targetPos)
-    elseif dist < desiredDist - 2.0 then
-        local stepBack = myPos - toTarget.Unit * 3.0
+    -- 2. Естественное перемещение ногами по земле к мобу (высота строго на уровне пола!)
+    if dist > desiredDist + 1.5 then
+        -- Идем шагами по земле к врагу:
+        local groundTarget = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
+        hum:MoveTo(groundTarget)
+    elseif dist < desiredDist - 2.5 then
+        -- Моб подошел слишком близко: делаем пару шагов назад
+        local stepBack = Vector3.new(myPos.X - toTarget.Unit.X * 3.0, myPos.Y, myPos.Z - toTarget.Unit.Z * 3.0)
         hum:MoveTo(stepBack)
     else
-        -- На дистанции удара стоим твердо на земле
-        hum:MoveTo(myPos)
+        -- На дистанции удара: стоим твердо на ногах (не скользим!)
+        hum:Move(Vector3.zero, false)
     end
 
-    -- 3. Нативная атака мечом и навыки с защитой от rate-limit (лимит сервера: max 30/сек)
+    -- 3. Натуральная атака мечом (рубим стоя на ногах)
     local now = os.clock()
-    if (now - LastAttackTime) >= (Context.Settings.SwingDelay or 0.12) then
+    if (now - LastAttackTime) >= (Context.Settings.SwingDelay or 0.14) then
         LastAttackTime = now
         pcall(function()
             SkillInput.Press(Enums.SkillSlot.NormalAttack)
         end)
     end
 
-    -- Навыки вызываются строго по таймингам, предотвращая кик за спам пакетами
-    if (now - LastSkill1Time) >= 3.2 then
+    -- Навыки по своим таймингам
+    if (now - LastSkill1Time) >= 3.5 then
         LastSkill1Time = now
         pcall(function()
             SkillInput.Press(Enums.SkillSlot.Skill1)
         end)
     end
 
-    if (now - LastSkill2Time) >= 4.5 then
+    if (now - LastSkill2Time) >= 4.8 then
         LastSkill2Time = now
         pcall(function()
             SkillInput.Press(Enums.SkillSlot.Skill2)
         end)
     end
 
-    if (now - LastSkill3Time) >= 6.0 then
+    if (now - LastSkill3Time) >= 6.5 then
         LastSkill3Time = now
         pcall(function()
             SkillInput.Press(Enums.SkillSlot.Skill3)
         end)
     end
 
-    -- Нативный рывок раз в 4 секунды
-    if Context.Settings.AutoDash and (now - Context.LastDashTime) >= 4.0 then
+    -- Рывок Dash ТОЛЬКО если включен вручную (по умолчанию выключен, чтобы не бросать в воздух)
+    if Context.Settings.AutoDash and (now - Context.LastDashTime) >= 5.0 then
         Context.LastDashTime = now
         pcall(function()
             SkillInput.Press(Enums.SkillSlot.Dash)
@@ -525,20 +532,24 @@ function Farm.AttackTargetLegit(target)
     end
 end
 
--- ПРЯМОЙ БЕГ ВПЕРЁД ПО ДОРОГЕ (100% по земле)
+-- ЕСТЕСТВЕННЫЙ БЕГ ВПЕРЁД ПО ДОРОЖКЕ (ноги двигаются, персонаж шагает по земле)
 function Farm.WalkForward()
     local root = GetRootPart()
     local hum = GetHumanoid()
     if not root or not hum then return end
 
+    if hum.PlatformStand then hum.PlatformStand = false end
+    if hum.Sit then hum.Sit = false end
+    hum.AutoRotate = true
+
     local currentPos = root.Position
-    -- Бежим строго вперед по дорожке вдоль оси -Z
-    local nextPoint = Vector3.new(-1.2, currentPos.Y, currentPos.Z - 25)
+    -- Точка шага строго впереди на уровне пола дорожки (-Z)
+    local nextPoint = Vector3.new(-1.2, currentPos.Y, currentPos.Z - 28)
 
     hum:MoveTo(nextPoint)
 
-    -- Если уперся в ступеньку или порог - обычный прыжок с земли
-    if root.Velocity.Magnitude < 0.8 and hum.FloorMaterial ~= Enum.Material.Air then
+    -- Прыжок ТОЛЬКО если персонаж застрял в бордюре или ступеньке
+    if root.Velocity.Magnitude < 0.5 and hum.FloorMaterial ~= Enum.Material.Air then
         hum.Jump = true
     end
 end
@@ -643,7 +654,7 @@ SpawnThread(function()
                     Farm.WalkForward()
                     Farm.CollectLoot()
                 end
-                task.wait(0.12)
+                task.wait(0.3) -- Пауза дает анимации ног полностью воспроизвести шаги без скольжения
             end
         else
             task.wait(0.3)
@@ -704,7 +715,7 @@ local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Ryomotik • v2.8 Ground Anti-Kick",
+    SubTitle = "by Ryomotik • v2.9 Natural Walker",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -783,8 +794,8 @@ Tabs.Stages:AddSlider("TargetRange", {
 })
 
 local ToggleDash = Tabs.Stages:AddToggle("AutoDash", {
-    Title = "Использовать рывок (Dash) в бою",
-    Default = true
+    Title = "Рывок (Dash) в бою [Выкл = чистая ходьба ногами]",
+    Default = false
 })
 ToggleDash:OnChanged(function(val) Context.Settings.AutoDash = val end)
 
@@ -964,6 +975,6 @@ end
 Window:SelectTab(2)
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "v2.8 Ground Anti-Kick загружен! Автор: Ryomotik. Меню: LeftControl.",
+    Content = "v2.9 Natural Walker загружен! Автор: Ryomotik. Меню: LeftControl.",
     Duration = 4
 })
