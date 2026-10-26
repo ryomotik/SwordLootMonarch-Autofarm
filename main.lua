@@ -4,7 +4,7 @@
     ⚡ Engine: Fluent UI (Amethyst Purple Edition)
     👑 Author: Ryomotik
     🛠️ Co-Developer: Antigravity Automation
-    🔬 Version: v2.5 Smart Stages & Precise Loot Filter
+    🔬 Version: v2.6 Straight Corridor Walk & Strict Combat Proximity
     ═══════════════════════════════════════════════════════════════
 ]]
 
@@ -32,7 +32,6 @@ local Shared = ReplicatedStorage:WaitForChild("Shared", 15)
 local Net = require(Shared:WaitForChild("Net"):WaitForChild("Net"))
 local Protocol = require(Shared:WaitForChild("Net"):WaitForChild("Protocol"))
 local Enums = require(Shared:WaitForChild("Enums"))
-local TeleportConfig = require(Shared:WaitForChild("Config"):WaitForChild("Teleport"))
 local Msg = Protocol.Msg
 
 local ClientScripts = LocalPlayer:WaitForChild("PlayerScripts", 15):WaitForChild("Client", 15)
@@ -48,15 +47,14 @@ local Context = {
     Threads = {},
     LastFarmPosition = nil,
     LastDashTime = 0,
-    LastLootTime = 0,
-    LastStageAction = 0,
     StartTime = os.clock(),
     Settings = {
         AutoSwing = false,
         SwingDelay = 0.08,
         AutoStageRun = false,
         AutoMobs = false,
-        CombatDistance = 8.5,
+        CombatDistance = 8.0,
+        MaxTargetRange = 45.0, -- Только мобы в радиусе 45 studs! Никакого таргета за 300+ studs!
         AutoDash = true,
         SmartHeal = true,
         AutoRebirth = false,
@@ -64,9 +62,8 @@ local Context = {
         AutoEquipBest = false,
         EquipInterval = 8.0,
         AutoLoot = true,
-        LootInterval = 0.6,
+        LootInterval = 0.5,
         MinLootTier = 6, -- 6 = Мифик и выше (Mythic, Celestial, Secret, Divine, Zenith)
-        AutoStage = true,
         AntiAFK = true,
         FPSBoost = false,
         WebhookEnabled = false,
@@ -117,14 +114,13 @@ local function GetStats()
             Coins = data.Coins or 0,
             Rebirth = data.Rebirth or 0,
             Level = data.Level or 1,
-            Stage = data.Stage,
             CareerMaxStage = data.CareerMaxStage or 1
         }
     end
-    return { Power = 0, Coins = 0, Rebirth = 0, Level = 1, Stage = nil, CareerMaxStage = 1 }
+    return { Power = 0, Coins = 0, Rebirth = 0, Level = 1, CareerMaxStage = 1 }
 end
 
--- Плавное и стабильное перетаскивание окна (Smooth Dragging)
+-- Плавное перетаскивание окна (Smooth Dragging)
 local function EnableSmoothDrag(frame, dragHandle)
     dragHandle = dragHandle or frame
     local dragging = false
@@ -173,39 +169,34 @@ end
 -- 5. МОДУЛИ ФАРМА
 local Farm = {}
 
--- Фарм силы через прямой сетевой протокол
 function Farm.ClickTrain()
     pcall(function()
         Net.FireServer(Msg.TrainManualClick)
     end)
 end
 
--- Авто-экипировка лучшего оружия
 function Farm.EquipBest()
     pcall(function()
         Net.InvokeServer(Msg.InvEquipBest)
     end)
 end
 
--- Авто-ребёрф
 function Farm.Rebirth()
     pcall(function()
         Net.InvokeServer(Msg.PlayerRebirth)
     end)
 end
 
--- Установка серверного фильтра лута игры
 function Farm.ApplyNativeLootFilter(tier)
     pcall(function()
         Net.InvokeServer(Msg.SetLootFilter, tier)
     end)
 end
 
--- Точное определение редкости выпавшего предмета (по PointLight и цвету Enums)
+-- Определение редкости по источнику света PointLight
 function Farm.GetDropRarity(dropPart)
     if not dropPart then return 1 end
 
-    -- 1. Поиск PointLight (создаётся нативным DropRenderer с цветом Enums.RarityColor)
     local light = dropPart:FindFirstChildOfClass("PointLight")
     if not light then
         for _, child in ipairs(dropPart:GetChildren()) do
@@ -235,7 +226,6 @@ function Farm.GetDropRarity(dropPart)
         end
     end
 
-    -- 2. Проверка текста на ProximityPrompt
     local prompt = dropPart:FindFirstChildOfClass("ProximityPrompt", true)
     if prompt then
         local text = string.lower(prompt.ObjectText .. " " .. prompt.ActionText)
@@ -255,7 +245,7 @@ function Farm.GetDropRarity(dropPart)
     return 1
 end
 
--- Умный сбор лута (Фильтрация: мифики и выше)
+-- Сбор лута: подбор через Net.FireServer по UID и ProximityPrompt
 function Farm.CollectLoot()
     local drops = Workspace:FindFirstChild("DropsClient")
     if not drops then return end
@@ -275,14 +265,12 @@ function Farm.CollectLoot()
                 local isBossChest = string.find(name, "boss") or string.find(name, "chest")
 
                 if rarity >= minTier or isBossChest then
-                    -- 1. Вызов нативного сетевого события подбора по UID
                     local uid = tonumber(string.match(obj.Name, "%d+"))
                     if uid then
                         pcall(function()
                             Net.FireServer(Msg.DropPickup, uid)
                         end)
                     end
-                    -- 2. Активация ProximityPrompt
                     local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
                     if prompt then
                         pcall(fireproximityprompt, prompt)
@@ -293,8 +281,11 @@ function Farm.CollectLoot()
     end
 end
 
--- Поиск цели в EnemiesClient
-function Farm.GetTargetEnemy()
+-- Поиск цели ТОЛЬКО в радиусе maxDistance (по умолчанию 45 studs)
+-- Если моб дальше 45 studs — функция вернет nil, и бот не будет бить воздух!
+function Farm.GetTargetEnemy(maxDistance)
+    maxDistance = maxDistance or Context.Settings.MaxTargetRange or 45.0
+
     local enemiesFolder = Workspace:FindFirstChild("EnemiesClient")
     if not enemiesFolder then return nil end
 
@@ -302,7 +293,7 @@ function Farm.GetTargetEnemy()
     if not root then return nil end
 
     local bestTarget = nil
-    local minDistance = math.huge
+    local minDistance = maxDistance
 
     for _, enemy in ipairs(enemiesFolder:GetChildren()) do
         if enemy:IsA("Model") then
@@ -310,7 +301,7 @@ function Farm.GetTargetEnemy()
             local eHrp = enemy:FindFirstChild("HumanoidRootPart") or enemy:FindFirstChild("Torso")
             if eHum and eHrp and eHum.Health > 0 then
                 local dist = (eHrp.Position - root.Position).Magnitude
-                if dist < minDistance then
+                if dist <= minDistance then
                     minDistance = dist
                     bestTarget = { Model = enemy, Root = eHrp, Hum = eHum, Distance = dist }
                 end
@@ -320,7 +311,7 @@ function Farm.GetTargetEnemy()
     return bestTarget
 end
 
--- 100% Легитимный бой на земле (Без полёта, без кика Error 267)
+-- Наземный бой: только с мобами рядом
 function Farm.AttackTargetLegit(target)
     local root = GetRootPart()
     local hum = GetHumanoid()
@@ -331,7 +322,7 @@ function Farm.AttackTargetLegit(target)
     local toTarget = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
     local dist = toTarget.Magnitude
 
-    -- 1. Откат при низком здоровье (<35% HP)
+    -- 1. Откат при критическом здоровье
     if Context.Settings.SmartHeal and hum.Health > 0 and (hum.Health / hum.MaxHealth) < 0.35 then
         if dist > 0.1 then
             local runAwayPos = myPos - toTarget.Unit * 25
@@ -341,26 +332,27 @@ function Farm.AttackTargetLegit(target)
         return
     end
 
-    local desiredDist = Context.Settings.CombatDistance or 8.5
+    local desiredDist = Context.Settings.CombatDistance or 8.0
 
-    -- 2. Наземное перемещение
-    if dist > desiredDist + 3 then
+    -- 2. Подход к мобу ногами
+    if dist > desiredDist + 2.5 then
         hum:MoveTo(targetPos)
-    elseif dist < desiredDist - 2 then
+    elseif dist < desiredDist - 2.0 then
         local backPos = myPos - toTarget.Unit * 3
         hum:MoveTo(backPos)
     else
+        -- На боевой дистанции: стрейф
         local perp = Vector3.new(-toTarget.Z, 0, toTarget.X).Unit
         local strafeDir = math.sin(os.clock() * 2.8)
-        local strafePos = targetPos + (toTarget.Unit * desiredDist) + (perp * strafeDir * 5)
+        local strafePos = targetPos + (toTarget.Unit * desiredDist) + (perp * strafeDir * 4.5)
         hum:MoveTo(strafePos)
     end
 
-    -- 3. Плавный поворот к врагу
+    -- 3. Поворот лицом к врагу
     local lookTarget = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
     root.CFrame = CFrame.lookAt(myPos, lookTarget)
 
-    -- 4. Нативный Dash на земле
+    -- 4. Нативный Dash
     local now = os.clock()
     if Context.Settings.AutoDash and (now - Context.LastDashTime) > 3.0 then
         Context.LastDashTime = now
@@ -369,7 +361,7 @@ function Farm.AttackTargetLegit(target)
         end)
     end
 
-    -- 5. Атака оружием и скиллами
+    -- 5. Атака мечом и всеми навыками
     pcall(function()
         SkillInput.Press(Enums.SkillSlot.NormalAttack)
         SkillInput.Press(Enums.SkillSlot.Skill1)
@@ -378,90 +370,22 @@ function Farm.AttackTargetLegit(target)
     end)
 end
 
--- Автопрохождение и продвижение по этапам (Stages Progression)
-function Farm.AdvanceStage()
+-- ПРЯМОЙ БЕГ ВПЕРЁД ПО ДОРОГЕ (через ворота Подземелья в локации)
+function Farm.WalkForward()
     local root = GetRootPart()
     local hum = GetHumanoid()
     if not root or not hum then return end
 
-    local map = Workspace:FindFirstChild("Map")
-    local stagesFolder = map and map:FindFirstChild("Stages")
-    local lobby = map and map:FindFirstChild("Lobby")
+    -- Осевая линия коридора подземелья: X = -1.2, направление Z строго уменьшается (-Z)
+    -- Персонаж бежит прямо по дороге вперёд
+    local currentPos = root.Position
+    local nextPoint = Vector3.new(-1.2, currentPos.Y, currentPos.Z - 30)
 
-    local runMaxClear = LocalPlayer:GetAttribute("RunMaxClear") or 0
-    local currentStageNum = runMaxClear + 1
+    hum:MoveTo(nextPoint)
 
-    -- Определяем, находится ли игрок в Лобби или уже на этапах
-    local isAtStages = root.Position.Z < 250
-
-    if not isAtStages then
-        -- ИГРОК В ЛОББИ: Направляемся к StageTeleporter
-        local stats = GetStats()
-        local bestCheckpoint = 1
-        if TeleportConfig and TeleportConfig.Best and stats.CareerMaxStage then
-            local bestTable = TeleportConfig.Best(stats.CareerMaxStage)
-            if bestTable and (bestTable.Stage or bestTable.Id) then
-                bestCheckpoint = bestTable.Stage or bestTable.Id
-            end
-        end
-
-        local stageTeleporter = lobby and lobby:FindFirstChild("StageTeleporter")
-        if stageTeleporter then
-            local padPos = stageTeleporter:IsA("Model") and stageTeleporter:GetPivot().Position or stageTeleporter.Position
-            local distToPad = (Vector3.new(padPos.X, root.Position.Y, padPos.Z) - root.Position).Magnitude
-
-            if distToPad > 12 then
-                hum:MoveTo(padPos)
-            else
-                -- Стоим на телепортере: вызываем телепорт на валидный чекпоинт
-                local now = os.clock()
-                if (now - Context.LastStageAction) > 2.5 then
-                    Context.LastStageAction = now
-                    pcall(function()
-                        Net.InvokeServer(Msg.StageTeleport, bestCheckpoint)
-                    end)
-                end
-            end
-        else
-            -- Если телепортер не найден, бежим к первому этапу
-            local s1 = stagesFolder and stagesFolder:FindFirstChild("1")
-            if s1 and s1:FindFirstChild("Spawn") then
-                hum:MoveTo(s1.Spawn.Position)
-            end
-        end
-        return
-    end
-
-    -- ИГРОК НА ЭТАПАХ: Продвижение по цепочке Stage 1 -> 2 -> 3 ...
-    local currentStageFolder = stagesFolder and stagesFolder:FindFirstChild(tostring(currentStageNum))
-    if currentStageFolder then
-        local levelArea = currentStageFolder:FindFirstChild("LevelArea") or currentStageFolder:FindFirstChild("BattleArea")
-        local spawnPart = currentStageFolder:FindFirstChild("Spawn")
-        local winArea = currentStageFolder:FindFirstChild("WinArea")
-
-        local areaPos = (levelArea and levelArea.Position) or (spawnPart and spawnPart.Position)
-        if areaPos then
-            local distToArea = (Vector3.new(areaPos.X, root.Position.Y, areaPos.Z) - root.Position).Magnitude
-            if distToArea > 16 then
-                -- Бежим в зону боя текущего этапа
-                hum:MoveTo(areaPos)
-            else
-                -- Если стоим в зоне боя, но мобов нет — бежим в сторону WinArea / следующего этапа
-                local nextStageFolder = stagesFolder:FindFirstChild(tostring(currentStageNum + 1))
-                if nextStageFolder and nextStageFolder:FindFirstChild("Spawn") then
-                    hum:MoveTo(nextStageFolder.Spawn.Position)
-                elseif winArea then
-                    local wPos = winArea:IsA("Model") and winArea:GetPivot().Position or winArea.Position
-                    hum:MoveTo(wPos)
-                else
-                    -- Бег по коридору этапов в сторону убывания Z
-                    hum:MoveTo(root.Position + Vector3.new(0, 0, -28))
-                end
-            end
-        end
-    else
-        -- За пределами последнего известного этапа: бег вперед
-        hum:MoveTo(root.Position + Vector3.new(0, 0, -30))
+    -- Если упёрся в бордюр или ступеньку ворот — авто-прыжок
+    if root.Velocity.Magnitude < 1.0 and hum.FloorMaterial ~= Enum.Material.Air then
+        hum.Jump = true
     end
 end
 
@@ -473,23 +397,6 @@ TrackConnection(LocalPlayer.Idled:Connect(function()
     end
 end))
 
--- Перехват StageCleared для моментального сбора лута
-local function SetupGameEvents()
-    local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
-    local MainEvent = Remotes and Remotes:FindFirstChild("MainEvent")
-    if MainEvent then
-        TrackConnection(MainEvent.OnClientEvent:Connect(function(msgId, ...)
-            if msgId == Msg.StageCleared then
-                task.delay(0.5, function()
-                    Farm.CollectLoot()
-                end)
-            end
-        end))
-    end
-end
-SetupGameEvents()
-
--- Применение фильтра при запуске
 Farm.ApplyNativeLootFilter(Context.Settings.MinLootTier)
 
 -- 7. DISCORD WEBHOOK
@@ -512,7 +419,7 @@ local function SendWebhook()
                 { name = "🔄 Перерождения", value = "`" .. tostring(stats.Rebirth) .. "`", inline = true },
                 { name = "💰 Монеты", value = "`" .. tostring(stats.Coins) .. "`", inline = true },
                 { name = "🗺️ Макс. Этап", value = "`Stage " .. tostring(stats.CareerMaxStage) .. "`", inline = true },
-                { name = "🛡️ Режим боя", value = "🟢 100% Legit Ground (Anti-Kick)", inline = true }
+                { name = "🛡️ Режим боя", value = "🟢 Ground Corridor Runner", inline = true }
             },
             footer = { text = "Sword Loot Monarch • by Ryomotik" },
             timestamp = DateTime.now():ToIsoDate()
@@ -529,8 +436,8 @@ local function SendWebhook()
     end)
 end
 
--- 8. ИСПОЛНИТЕЛЬНЫЕ ФОНОВЫЕ ПОТОКИ
--- Поток тренировки силы
+-- 8. ГЛАВНЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ ЦИКЛ
+-- Поток тренировки силы (если включен ручной режим свинга)
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoSwing and not Context.Settings.AutoStageRun and not Context.Settings.AutoMobs then
@@ -542,20 +449,24 @@ SpawnThread(function()
     end
 end)
 
--- Поток прохождения этапов и наземного боя
+-- ГЛАВНЫЙ ПОТОК: Идти вперед -> Увидел моба рядом (<45 studs) -> Убил -> Пошел дальше
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoStageRun or Context.Settings.AutoMobs then
-            local target = Farm.GetTargetEnemy()
+            -- Проверяем мобов ТОЛЬКО рядом (в радиусе 45 studs)!
+            local target = Farm.GetTargetEnemy(Context.Settings.MaxTargetRange or 45.0)
+
             if target then
+                -- Рядом есть враг: дерёмся
                 Farm.AttackTargetLegit(target)
                 task.wait(Context.Settings.SwingDelay)
             else
+                -- Врагов рядом НЕТ: НЕ используем скилы в пустоту, а ПРОСТО ИДЁМ ВПЕРЁД!
                 if Context.Settings.AutoStageRun then
-                    Farm.AdvanceStage()
+                    Farm.WalkForward()
                     Farm.CollectLoot()
                 end
-                task.wait(0.2)
+                task.wait(0.12)
             end
         else
             task.wait(0.3)
@@ -563,7 +474,7 @@ SpawnThread(function()
     end
 end)
 
--- Поток сбора лута с точной фильтрацией
+-- Поток подбора лута
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoLoot then
@@ -616,7 +527,7 @@ local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Ryomotik • v2.5 Amethyst",
+    SubTitle = "by Ryomotik • v2.6 Runner",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -625,7 +536,6 @@ local Window = Fluent:CreateWindow({
 })
 Fluent:SetTheme("Amethyst")
 
--- Подключение плавного перемещения окна (Smooth Dragging)
 task.defer(function()
     pcall(function()
         if Window and Window.Frame then
@@ -655,7 +565,6 @@ local Tabs = {
     Settings = Window:AddTab({ Title = "Конфиг", Icon = "settings" })
 }
 
--- Вкладка 1: Основной фарм
 local ToggleSwing = Tabs.Main:AddToggle("AutoSwing", { Title = "Авто-клик / Тренировка силы (Native)", Default = false })
 ToggleSwing:OnChanged(function(val) Context.Settings.AutoSwing = val end)
 
@@ -668,9 +577,9 @@ Tabs.Main:AddSlider("SwingSpeed", {
     Callback = function(val) Context.Settings.SwingDelay = val end
 })
 
--- Вкладка 2: Прохождение Этапов и Легитимный Бой
+-- Вкладка 2: Прохождение Этапов
 local ToggleStageRun = Tabs.Stages:AddToggle("AutoStageRun", {
-    Title = "🚀 Автопрохождение этапов (Lobby -> Run -> Next)",
+    Title = "🚀 Автопрохождение этапов (Идти вперёд -> Убить мобов -> Дальше)",
     Default = false
 })
 ToggleStageRun:OnChanged(function(val)
@@ -678,29 +587,38 @@ ToggleStageRun:OnChanged(function(val)
     if val then
         Fluent:Notify({
             Title = "Этапы",
-            Content = "Запущен цикл умного прохождения этапов и наземного боя!",
+            Content = "Запущен режим коридорного бега: идёт вперёд, зачищает мобов и идёт дальше!",
             Duration = 3.5
         })
     end
 end)
 
 local ToggleMobs = Tabs.Stages:AddToggle("AutoMobs", {
-    Title = "Авто-фарм только мобов рядом (без перехода на этапы)",
+    Title = "Только бой с мобами рядом (без бега вперёд)",
     Default = false
 })
 ToggleMobs:OnChanged(function(val) Context.Settings.AutoMobs = val end)
 
 Tabs.Stages:AddSlider("CombatDist", {
     Title = "Дистанция удара мечом от моба (Studs)",
-    Default = 8.5,
-    Min = 6.0,
-    Max = 14.0,
+    Default = 8.0,
+    Min = 5.0,
+    Max = 12.0,
     Rounding = 1,
     Callback = function(val) Context.Settings.CombatDistance = val end
 })
 
+Tabs.Stages:AddSlider("TargetRange", {
+    Title = "Радиус обнаружения врагов рядом (Studs)",
+    Default = 45.0,
+    Min = 20.0,
+    Max = 80.0,
+    Rounding = 0,
+    Callback = function(val) Context.Settings.MaxTargetRange = val end
+})
+
 local ToggleDash = Tabs.Stages:AddToggle("AutoDash", {
-    Title = "Использовать рывок (Dash) на земле",
+    Title = "Использовать рывок (Dash) в бою",
     Default = true
 })
 ToggleDash:OnChanged(function(val) Context.Settings.AutoDash = val end)
@@ -836,6 +754,6 @@ end
 Window:SelectTab(2)
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "v2.5 загружен! Автор: Ryomotik. Меню: LeftControl.",
+    Content = "v2.6 Runner загружен! Автор: Ryomotik. Меню: LeftControl.",
     Duration = 4
 })
