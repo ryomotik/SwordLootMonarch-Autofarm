@@ -3,36 +3,62 @@
     🎮 Game: [+1 Sword Loot Monarch] (PlaceId: 93239606899307)
     ⚡ Engine: Fluent UI (Nord / Deep Sea Edition)
     👑 Authors: Abror & Antigravity
-    🌐 Repository: https://github.com/YOUR_USERNAME/SwordLootMonarch-Autofarm
+    🔬 Reengineered Architecture: Native Net & Protocol Integration
     ═══════════════════════════════════════════════════════════════
 ]]
 
--- 0. ПРЕДОТВРАЩЕНИЕ ДУБЛИРОВАНИЯ ЭКЗЕМПЛЯРОВ
+-- 0. ПРЕДОТВРАЩЕНИЕ ДУБЛИРОВАНИЯ
 if getgenv().SwordMonarchInstance then
     pcall(function()
         getgenv().SwordMonarchInstance:Unload()
     end)
 end
 
+-- 1. СЕРВИСЫ
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualUser = game:GetService("VirtualUser")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+-- 2. ПОДКЛЮЧЕНИЕ К ВНУТРЕННИМ МОДУЛЯМ ИГРЫ (Reverse-Engineered Core)
+local Shared = ReplicatedStorage:WaitForChild("Shared", 15)
+local Net = require(Shared:WaitForChild("Net"):WaitForChild("Net"))
+local Protocol = require(Shared:WaitForChild("Net"):WaitForChild("Protocol"))
+local Enums = require(Shared:WaitForChild("Enums"))
+local Msg = Protocol.Msg
+
+local ClientScripts = LocalPlayer:WaitForChild("PlayerScripts", 15):WaitForChild("Client", 15)
+local ClientData = require(ClientScripts:WaitForChild("ClientData", 15))
+local SkillInput = require(ClientScripts:WaitForChild("SkillInput", 15))
+
+local HttpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+
+-- 3. СОСТОЯНИЕ СКРИПТА
 local Context = {
     Running = true,
     Connections = {},
     Threads = {},
     LastFarmPosition = nil,
     StartTime = os.clock(),
-    Remotes = {},
     Settings = {
         AutoSwing = false,
         SwingDelay = 0.08,
         AutoRebirth = false,
         RebirthDelay = 2.0,
         AutoEquipBest = false,
-        EquipInterval = 10,
+        EquipInterval = 8.0,
         AutoMobs = false,
-        MobDistance = 6.5,
-        TargetMob = "Nearest",
-        AutoBuyZones = false,
-        ZoneInterval = 5,
+        MobDistance = 6.0,
+        AutoLoot = true,
+        LootInterval = 1.0,
+        AutoStage = false,
+        StageInterval = 10.0,
         AntiAFK = true,
         AutoReturn = true,
         FPSBoost = false,
@@ -43,23 +69,7 @@ local Context = {
 }
 getgenv().SwordMonarchInstance = Context
 
--- 1. СЕРВИСЫ И ОКРУЖЕНИЕ
-local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local VirtualUser = game:GetService("VirtualUser")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-local HttpService = game:GetService("HttpService")
-
-local LocalPlayer = Players.LocalPlayer
-local Camera = Workspace.CurrentCamera
-
--- Универсальный HTTP-клиент для Webhook
-local HttpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-
--- 2. СИСТЕМА УПРАВЛЕНИЯ РЕСУРСАМИ (Clean Registry)
+-- 4. СЛУЖЕБНЫЕ ФУНКЦИИ
 local function TrackConnection(conn)
     table.insert(Context.Connections, conn)
     return conn
@@ -70,7 +80,7 @@ local function SpawnThread(fn)
         while Context.Running do
             local success, err = pcall(fn)
             if not success and Context.Running then
-                warn("[Thread Error]:", err)
+                warn("[Sword Monarch Thread Error]:", err)
                 task.wait(1)
             end
         end
@@ -88,182 +98,112 @@ local function GetRootPart()
     return char:WaitForChild("HumanoidRootPart", 5)
 end
 
-local function GetHumanoid()
-    local char = GetCharacter()
-    return char:WaitForChild("Humanoid", 5)
+local function GetStats()
+    local data = ClientData and ClientData.Get and ClientData.Get()
+    if data then
+        return {
+            Power = data.Power or 0,
+            Coins = data.Coins or 0,
+            Rebirth = data.Rebirth or 0,
+            Level = data.Level or 1,
+            Stage = data.CareerMaxStage or 1
+        }
+    end
+    return { Power = 0, Coins = 0, Rebirth = 0, Level = 1, Stage = 1 }
 end
 
--- Поиск характеристик (leaderstats / Attributes)
-local function GetPlayerStat(statName)
-    local stats = LocalPlayer:FindFirstChild("leaderstats")
-    if stats then
-        for _, item in ipairs(stats:GetChildren()) do
-            if string.lower(item.Name) == string.lower(statName) then
-                return item.Value
-            end
-        end
-    end
-    local attr = LocalPlayer:GetAttribute(statName)
-    if attr ~= nil then return attr end
-    local char = LocalPlayer.Character
-    if char then
-        local charAttr = char:GetAttribute(statName)
-        if charAttr ~= nil then return charAttr end
-    end
-    return 0
+-- 5. МОДУЛИ ФАРМА
+local Farm = {}
+
+-- Фарм силы (Прямой вызов сетевого протокола TrainManualClick)
+function Farm.ClickTrain()
+    pcall(function()
+        Net.FireServer(Msg.TrainManualClick)
+    end)
 end
 
--- 3. NETBRIDGE: АДАПТИВНЫЙ СКАНЕР И ЗАЩИЩЕННЫЙ КЛИЕНТ РЕМОУТОВ
-local NetBridge = {
-    Cooldowns = {},
-    RateLimit = 0.05
-}
+-- Авто-экипировка лучшего меча (Нативный InvokeServer)
+function Farm.EquipBest()
+    pcall(function()
+        Net.InvokeServer(Msg.InvEquipBest)
+    end)
+end
 
-function NetBridge.ScanRemotes()
-    local keywords = {
-        Swing = { "swing", "click", "train", "slash", "attack", "hit", "damage", "punch" },
-        Rebirth = { "rebirth", "prestige", "ascend", "restart" },
-        Equip = { "equipbest", "equip_best", "autoequip", "bestsword", "weaponequip" },
-        Zone = { "unlockzone", "buyzone", "teleportzone", "area", "unlockarea", "world" },
-        Upgrade = { "upgrade", "buyupgrade", "purchasestat", "upgradestat" }
-    }
+-- Авто-ребёрф (Нативный InvokeServer)
+function Farm.Rebirth()
+    pcall(function()
+        Net.InvokeServer(Msg.PlayerRebirth)
+    end)
+end
 
-    for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-            local lowerName = string.lower(obj.Name)
-            for category, list in pairs(keywords) do
-                if not Context.Remotes[category] then
-                    for _, kw in ipairs(list) do
-                        if string.find(lowerName, kw) then
-                            Context.Remotes[category] = obj
-                            break
-                        end
-                    end
-                end
-            end
+-- Сбор лута и сундуков из DropsClient
+function Farm.CollectLoot()
+    local drops = Workspace:FindFirstChild("DropsClient")
+    if not drops then return end
+    for _, desc in ipairs(drops:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") then
+            pcall(fireproximityprompt, desc)
         end
     end
 end
 
-NetBridge.ScanRemotes()
-
-function NetBridge.Fire(remote, ...)
-    if not remote then return false end
-    local now = os.clock()
-    local lastFire = NetBridge.Cooldowns[remote] or 0
-    if (now - lastFire) < NetBridge.RateLimit then return false end
-    NetBridge.Cooldowns[remote] = now
-
-    local success, res = pcall(function(...)
-        if remote:IsA("RemoteEvent") then
-            remote:FireServer(...)
-        elseif remote:IsA("RemoteFunction") then
-            return remote:InvokeServer(...)
-        end
-    end, ...)
-    return success, res
-end
-
--- 4. МЕХАНИКА ФАРМА (1000+ IQ Loop Engine)
-local FarmEngine = {}
-
--- Авто-клик / Тренировка силы
-function FarmEngine.PerformSwing()
-    if Context.Remotes.Swing then
-        NetBridge.Fire(Context.Remotes.Swing)
-    else
-        local char = GetCharacter()
-        local tool = char:FindFirstChildOfClass("Tool")
-        if tool then
-            tool:Activate()
-        else
-            local bpTool = LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
-            if bpTool then
-                local hum = GetHumanoid()
-                if hum then hum:EquipTool(bpTool) end
-            else
-                VirtualUser:CaptureController()
-                VirtualUser:Button1Down(Vector2.new(100, 100))
-                task.wait(0.02)
-                VirtualUser:Button1Up(Vector2.new(100, 100))
-            end
-        end
+-- Переход в максимальную открытую зону (StageTeleport)
+function Farm.TeleportMaxStage()
+    local stats = GetStats()
+    if stats.Stage and stats.Stage > 0 then
+        pcall(function()
+            Net.InvokeServer(Msg.StageTeleport, stats.Stage)
+        end)
     end
 end
 
--- Авто-экипировка лучшего оружия
-function FarmEngine.EquipBest()
-    if Context.Remotes.Equip then
-        NetBridge.Fire(Context.Remotes.Equip)
-    else
-        local bestSword = nil
-        local maxPower = -1
-        local allSwords = {}
+-- Поиск цели в EnemiesClient
+function Farm.GetTargetEnemy()
+    local enemiesFolder = Workspace:FindFirstChild("EnemiesClient")
+    if not enemiesFolder then return nil end
 
-        for _, item in ipairs(LocalPlayer.Backpack:GetChildren()) do
-            if item:IsA("Tool") then table.insert(allSwords, item) end
-        end
-        local char = LocalPlayer.Character
-        if char then
-            for _, item in ipairs(char:GetChildren()) do
-                if item:IsA("Tool") then table.insert(allSwords, item) end
-            end
-        end
-
-        for _, tool in ipairs(allSwords) do
-            local power = tool:GetAttribute("Power") or tool:GetAttribute("Damage") or tool:GetAttribute("Multiplier") or 0
-            if power > maxPower then
-                maxPower = power
-                bestSword = tool
-            end
-        end
-
-        if bestSword and char then
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum and bestSword.Parent == LocalPlayer.Backpack then
-                hum:EquipTool(bestSword)
-            end
-        end
-    end
-end
-
--- Поиск мобов и боссов для безопасного фарма
-function FarmEngine.GetTargetMob()
     local root = GetRootPart()
     if not root then return nil end
 
-    local targets = {}
-    local mobFolders = {
-        Workspace:FindFirstChild("Enemies"),
-        Workspace:FindFirstChild("Mobs"),
-        Workspace:FindFirstChild("Monsters"),
-        Workspace:FindFirstChild("Bosses"),
-        Workspace
-    }
+    local bestTarget = nil
+    local minDistance = math.huge
 
-    for _, folder in ipairs(mobFolders) do
-        if folder then
-            for _, model in ipairs(folder:GetChildren()) do
-                if model:IsA("Model") and model ~= LocalPlayer.Character then
-                    local hum = model:FindFirstChildOfClass("Humanoid")
-                    local mRoot = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso")
-                    local isPlayer = Players:GetPlayerFromCharacter(model)
-
-                    if hum and mRoot and not isPlayer and hum.Health > 0 then
-                        local dist = (mRoot.Position - root.Position).Magnitude
-                        table.insert(targets, { Model = model, Root = mRoot, Hum = hum, Distance = dist })
-                    end
+    for _, enemy in ipairs(enemiesFolder:GetChildren()) do
+        if enemy:IsA("Model") then
+            local eHum = enemy:FindFirstChildOfClass("Humanoid")
+            local eHrp = enemy:FindFirstChild("HumanoidRootPart") or enemy:FindFirstChild("Torso")
+            if eHum and eHrp and eHum.Health > 0 then
+                local dist = (eHrp.Position - root.Position).Magnitude
+                if dist < minDistance then
+                    minDistance = dist
+                    bestTarget = { Model = enemy, Root = eHrp, Hum = eHum, Distance = dist }
                 end
             end
         end
     end
-
-    if #targets == 0 then return nil end
-    table.sort(targets, function(a, b) return a.Distance < b.Distance end)
-    return targets[1]
+    return bestTarget
 end
 
--- 5. FAILSAFE & ANTI-AFK СИСТЕМЫ
+-- Атака моба/босса с безопасной высоты
+function Farm.AttackTarget(target)
+    local root = GetRootPart()
+    if not root or not target or not target.Root or target.Hum.Health <= 0 then return end
+
+    -- Позиционирование ровно над мобом (моб не достает ближним боем)
+    local safePos = target.Root.CFrame * CFrame.new(0, Context.Settings.MobDistance, 0) * CFrame.Angles(math.rad(-90), 0, 0)
+    root.CFrame = safePos
+    root.Velocity = Vector3.zero
+
+    -- Применение всех доступных скиллов и обычной атаки
+    pcall(function()
+        SkillInput.Press(Enums.SkillSlot.NormalAttack)
+        SkillInput.Press(Enums.SkillSlot.Skill1)
+        SkillInput.Press(Enums.SkillSlot.Skill2)
+        SkillInput.Press(Enums.SkillSlot.Skill3)
+    end)
+end
+
+-- 6. FAILSAFE И СИСТЕМА ВОЗВРАТА
 TrackConnection(LocalPlayer.Idled:Connect(function()
     if Context.Settings.AntiAFK then
         VirtualUser:CaptureController()
@@ -271,44 +211,35 @@ TrackConnection(LocalPlayer.Idled:Connect(function()
     end
 end))
 
-local function SetupFailsafe()
-    TrackConnection(LocalPlayer.CharacterAdded:Connect(function(newChar)
-        if not Context.Settings.AutoReturn then return end
-        local root = newChar:WaitForChild("HumanoidRootPart", 10)
-        local hum = newChar:WaitForChild("Humanoid", 10)
+TrackConnection(LocalPlayer.CharacterAdded:Connect(function(newChar)
+    if not Context.Settings.AutoReturn then return end
+    local root = newChar:WaitForChild("HumanoidRootPart", 10)
+    if root and Context.LastFarmPosition then
+        task.wait(0.7)
+        root.CFrame = Context.LastFarmPosition
+        root.Velocity = Vector3.zero
+        if Context.Settings.AutoEquipBest then
+            task.wait(0.3)
+            Farm.EquipBest()
+        end
+    end
+end))
 
-        if root and Context.LastFarmPosition then
-            task.wait(0.7)
-            root.CFrame = Context.LastFarmPosition
+TrackConnection(RunService.Heartbeat:Connect(function()
+    if Context.Settings.AutoReturn and Context.LastFarmPosition then
+        local root = GetRootPart()
+        if root and root.Position.Y < (Workspace.FallenPartsDestroyHeight + 40) then
             root.Velocity = Vector3.zero
-            root.RotVelocity = Vector3.zero
-            if Context.Settings.AutoEquipBest then
-                task.wait(0.3)
-                FarmEngine.EquipBest()
-            end
+            root.CFrame = Context.LastFarmPosition
         end
-    end))
+    end
+end))
 
-    TrackConnection(RunService.Heartbeat:Connect(function()
-        if Context.Settings.AutoReturn and Context.LastFarmPosition then
-            local root = GetRootPart()
-            if root and root.Position.Y < (Workspace.FallenPartsDestroyHeight + 40) then
-                root.Velocity = Vector3.zero
-                root.CFrame = Context.LastFarmPosition
-            end
-        end
-    end))
-end
-SetupFailsafe()
+-- 7. DISCORD WEBHOOK
+local function SendWebhook()
+    if not Context.Settings.WebhookEnabled or Context.Settings.WebhookURL == "" or not HttpRequest then return end
 
--- 6. DISCORD WEBHOOK
-local function SendDiscordWebhook()
-    if not Context.Settings.WebhookEnabled or Context.Settings.WebhookURL == "" then return end
-    if not HttpRequest then return end
-
-    local power = GetPlayerStat("Power") or GetPlayerStat("Strength") or "N/A"
-    local rebirths = GetPlayerStat("Rebirth") or GetPlayerStat("Rebirths") or "N/A"
-    local coins = GetPlayerStat("Coins") or GetPlayerStat("Gold") or GetPlayerStat("Wins") or "N/A"
+    local stats = GetStats()
     local uptimeSec = math.floor(os.clock() - Context.StartTime)
     local uptime = string.format("%02dч %02dм %02dс", math.floor(uptimeSec / 3600), math.floor((uptimeSec % 3600) / 60), uptimeSec % 60)
 
@@ -320,10 +251,11 @@ local function SendDiscordWebhook()
                 { name = "👑 Разработчик", value = "`Abror`", inline = true },
                 { name = "👤 Игрок", value = "`" .. LocalPlayer.Name .. " (" .. LocalPlayer.DisplayName .. ")`", inline = true },
                 { name = "⏱️ Время сессии", value = "`" .. uptime .. "`", inline = true },
-                { name = "⚡ Сила / Power", value = "`" .. tostring(power) .. "`", inline = false },
-                { name = "🔄 Перерождения", value = "`" .. tostring(rebirths) .. "`", inline = true },
-                { name = "💰 Монеты / Победы", value = "`" .. tostring(coins) .. "`", inline = true },
-                { name = "🛡️ Статус защиты", value = Context.Settings.AutoReturn and "🟢 Failsafe Active" or "🟡 Failsafe Disabled", inline = false }
+                { name = "⚡ Сила / Power", value = "`" .. tostring(math.floor(stats.Power)) .. "`", inline = false },
+                { name = "🔄 Перерождения", value = "`" .. tostring(stats.Rebirth) .. "`", inline = true },
+                { name = "💰 Монеты", value = "`" .. tostring(stats.Coins) .. "`", inline = true },
+                { name = "🗺️ Макс. Зона", value = "`Stage " .. tostring(stats.Stage) .. "`", inline = true },
+                { name = "🛡️ Failsafe", value = Context.Settings.AutoReturn and "🟢 Активен" or "🔴 Выключен", inline = true }
             },
             footer = { text = "Sword Loot Monarch • by Abror" },
             timestamp = DateTime.now():ToIsoDate()
@@ -340,7 +272,8 @@ local function SendDiscordWebhook()
     end)
 end
 
--- 7. ЗАПУСК ФОНОВЫХ ПОТОКОВ ФАРМА
+-- 8. ИСПОЛНИТЕЛЬНЫЕ ФОНОВЫЕ ПОТОКИ
+-- Поток тренировки силы
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoSwing and not Context.Settings.AutoMobs then
@@ -348,7 +281,7 @@ SpawnThread(function()
             if root and not Context.LastFarmPosition then
                 Context.LastFarmPosition = root.CFrame
             end
-            FarmEngine.PerformSwing()
+            Farm.ClickTrain()
             task.wait(Context.Settings.SwingDelay)
         else
             task.wait(0.2)
@@ -356,21 +289,16 @@ SpawnThread(function()
     end
 end)
 
+-- Поток мобов и боссов
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoMobs then
-            local target = FarmEngine.GetTargetMob()
-            local root = GetRootPart()
-
-            if target and root and target.Root and target.Hum.Health > 0 then
-                local safeCF = target.Root.CFrame * CFrame.new(0, Context.Settings.MobDistance, 0) * CFrame.Angles(math.rad(-90), 0, 0)
-                root.CFrame = safeCF
-                root.Velocity = Vector3.zero
-
-                FarmEngine.PerformSwing()
+            local target = Farm.GetTargetEnemy()
+            if target then
+                Farm.AttackTarget(target)
                 task.wait(Context.Settings.SwingDelay)
             else
-                task.wait(0.4)
+                task.wait(0.3)
             end
         else
             task.wait(0.3)
@@ -378,12 +306,23 @@ SpawnThread(function()
     end
 end)
 
+-- Поток сбора лута (Drops Magnet)
+SpawnThread(function()
+    while Context.Running do
+        if Context.Settings.AutoLoot then
+            Farm.CollectLoot()
+            task.wait(Context.Settings.LootInterval)
+        else
+            task.wait(1.5)
+        end
+    end
+end)
+
+-- Поток авто-ребёрфа
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoRebirth then
-            if Context.Remotes.Rebirth then
-                NetBridge.Fire(Context.Remotes.Rebirth)
-            end
+            Farm.Rebirth()
             task.wait(Context.Settings.RebirthDelay)
         else
             task.wait(1)
@@ -391,10 +330,11 @@ SpawnThread(function()
     end
 end)
 
+-- Поток авто-экипировки
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoEquipBest then
-            FarmEngine.EquipBest()
+            Farm.EquipBest()
             task.wait(Context.Settings.EquipInterval)
         else
             task.wait(1)
@@ -402,36 +342,36 @@ SpawnThread(function()
     end
 end)
 
+-- Поток перехода по зонам
 SpawnThread(function()
     while Context.Running do
-        if Context.Settings.AutoBuyZones then
-            if Context.Remotes.Zone then
-                NetBridge.Fire(Context.Remotes.Zone)
-            end
-            task.wait(Context.Settings.ZoneInterval)
+        if Context.Settings.AutoStage then
+            Farm.TeleportMaxStage()
+            task.wait(Context.Settings.StageInterval)
         else
             task.wait(2)
         end
     end
 end)
 
+-- Поток Webhook
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.WebhookEnabled and Context.Settings.WebhookURL ~= "" then
             task.wait(Context.Settings.WebhookInterval)
-            SendDiscordWebhook()
+            SendWebhook()
         else
             task.wait(5)
         end
     end
 end)
 
--- 8. ИНТЕРФЕЙС FLUENT UI (Nord / Deep Sea)
+-- 9. FLUENT UI
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Abror • v2.0 Nord",
+    SubTitle = "by Abror • v2.1 Native",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -448,78 +388,92 @@ local Tabs = {
     Settings = Window:AddTab({ Title = "Конфиг", Icon = "settings" })
 }
 
-local ToggleSwing = Tabs.Main:AddToggle("AutoSwing", { Title = "Авто-клик / Тренировка силы", Default = false })
+-- Вкладка 1: Основной фарм
+local ToggleSwing = Tabs.Main:AddToggle("AutoSwing", { Title = "Авто-клик / Тренировка силы (Native)", Default = false })
 ToggleSwing:OnChanged(function(val)
     Context.Settings.AutoSwing = val
     if val then
         local root = GetRootPart()
         if root then Context.LastFarmPosition = root.CFrame end
-        Fluent:Notify({ Title = "Фарм", Content = "Цикл тренировки запущен. Точка зафиксирована.", Duration = 3 })
+        Fluent:Notify({ Title = "Фарм", Content = "Тренировка силы запущена через прямой Net-канал!", Duration = 3 })
     end
 end)
 
 Tabs.Main:AddSlider("SwingSpeed", {
     Title = "Задержка клика (сек)",
     Default = 0.08,
-    Min = 0.02,
+    Min = 0.03,
     Max = 0.5,
     Rounding = 2,
     Callback = function(val) Context.Settings.SwingDelay = val end
 })
 
+local ToggleLoot = Tabs.Main:AddToggle("AutoLoot", { Title = "Авто-сбор сундуков и дропа (Loot Magnet)", Default = true })
+ToggleLoot:OnChanged(function(val) Context.Settings.AutoLoot = val end)
+
 Tabs.Main:AddButton({
     Title = "📍 Зафиксировать текущую позицию",
-    Description = "Обновляет точку возврата для Failsafe",
+    Description = "Обновляет точку для Failsafe возврата",
     Callback = function()
         local root = GetRootPart()
         if root then
             Context.LastFarmPosition = root.CFrame
-            Fluent:Notify({ Title = "Failsafe", Content = "Новая позиция для респавна успешно сохранена!", Duration = 3 })
+            Fluent:Notify({ Title = "Failsafe", Content = "Точка возврата успешно сохранена!", Duration = 3 })
         end
     end
 })
 
-local ToggleMobs = Tabs.Combat:AddToggle("AutoMobs", { Title = "Авто-фарм мобов и боссов", Default = false })
+-- Вкладка 2: Мобы и Боссы
+local ToggleMobs = Tabs.Combat:AddToggle("AutoMobs", { Title = "Авто-фарм мобов (EnemiesClient)", Default = false })
 ToggleMobs:OnChanged(function(val)
     Context.Settings.AutoMobs = val
     if val then
         local root = GetRootPart()
         if root then Context.LastFarmPosition = root.CFrame end
-        Fluent:Notify({ Title = "Бой", Content = "Режим охоты на мобов включён (Safe Elevation).", Duration = 3 })
+        Fluent:Notify({ Title = "Бой", Content = "Авто-охота активирована с безопасной высоты.", Duration = 3 })
     end
 end)
 
 Tabs.Combat:AddSlider("MobElevation", {
     Title = "Безопасная высота над мобом (Studs)",
-    Default = 6.5,
+    Default = 6.0,
     Min = 4.0,
     Max = 15.0,
     Rounding = 1,
     Callback = function(val) Context.Settings.MobDistance = val end
 })
 
-local ToggleRebirth = Tabs.Progress:AddToggle("AutoRebirth", { Title = "Авто-перерождение (Auto Rebirth)", Default = false })
+-- Вкладка 3: Прокачка
+local ToggleRebirth = Tabs.Progress:AddToggle("AutoRebirth", { Title = "Авто-перерождение (PlayerRebirth)", Default = false })
 ToggleRebirth:OnChanged(function(val) Context.Settings.AutoRebirth = val end)
 
-local ToggleEquip = Tabs.Progress:AddToggle("AutoEquip", { Title = "Авто-экипировка лучшего меча (Equip Best)", Default = false })
+local ToggleEquip = Tabs.Progress:AddToggle("AutoEquip", { Title = "Авто-экипировка лучшего меча (InvEquipBest)", Default = false })
 ToggleEquip:OnChanged(function(val) Context.Settings.AutoEquipBest = val end)
 
-local ToggleZones = Tabs.Progress:AddToggle("AutoZones", { Title = "Авто-покупка следующих зон/миров", Default = false })
-ToggleZones:OnChanged(function(val) Context.Settings.AutoBuyZones = val end)
+local ToggleStage = Tabs.Progress:AddToggle("AutoStage", { Title = "Авто-переход в макс. открытую зону", Default = false })
+ToggleStage:OnChanged(function(val) Context.Settings.AutoStage = val end)
 
 Tabs.Progress:AddButton({
-    Title = "⚔️ Экипировать лучшее оружие сейчас",
-    Description = "Ручной триггер экипировки максимального меча",
+    Title = "⚔️ Экипировать лучший меч сейчас",
     Callback = function()
-        FarmEngine.EquipBest()
-        Fluent:Notify({ Title = "Инвентарь", Content = "Лучший меч экипирован!", Duration = 2.5 })
+        Farm.EquipBest()
+        Fluent:Notify({ Title = "Инвентарь", Content = "Команда InvEquipBest отправлена!", Duration = 2.5 })
     end
 })
 
+Tabs.Progress:AddButton({
+    Title = "🔄 Сделать Rebirth сейчас",
+    Callback = function()
+        Farm.Rebirth()
+        Fluent:Notify({ Title = "Прокачка", Content = "Команда PlayerRebirth отправлена!", Duration = 2.5 })
+    end
+})
+
+-- Вкладка 4: Сервис и AFK
 local ToggleAntiAFK = Tabs.Utility:AddToggle("AntiAFK", { Title = "Встроенный Anti-AFK (VirtualUser)", Default = true })
 ToggleAntiAFK:OnChanged(function(val) Context.Settings.AntiAFK = val end)
 
-local ToggleReturn = Tabs.Utility:AddToggle("AutoReturn", { Title = "Failsafe возврат на точку при респавне", Default = true })
+local ToggleReturn = Tabs.Utility:AddToggle("AutoReturn", { Title = "Failsafe авто-возврат на точку", Default = true })
 ToggleReturn:OnChanged(function(val) Context.Settings.AutoReturn = val end)
 
 local ToggleFPS = Tabs.Utility:AddToggle("FPSBoost", { Title = "FPS Boost (Отключение 3D-рендеринга)", Default = false })
@@ -529,11 +483,12 @@ ToggleFPS:OnChanged(function(val)
     if val and setfpscap then setfpscap(15) elseif setfpscap then setfpscap(60) end
     Fluent:Notify({
         Title = "Оптимизация",
-        Content = val and "3D-рендеринг отключен для экономии GPU/CPU." or "3D-рендеринг восстановлен.",
+        Content = val and "3D-рендеринг выключен для тихой работы в фоне." or "3D-рендеринг включен.",
         Duration = 3
     })
 end)
 
+-- Вкладка 5: Discord Webhook
 local ToggleWebhook = Tabs.Webhook:AddToggle("WebhookActive", { Title = "Включить отправку в Discord", Default = false })
 ToggleWebhook:OnChanged(function(val) Context.Settings.WebhookEnabled = val end)
 
@@ -556,17 +511,18 @@ Tabs.Webhook:AddSlider("WebhookDelay", {
 })
 
 Tabs.Webhook:AddButton({
-    Title = "📡 Отправить тестовый отчет сейчас",
+    Title = "📡 Отправить тестовый отчет",
     Callback = function()
         if Context.Settings.WebhookURL ~= "" then
-            SendDiscordWebhook()
-            Fluent:Notify({ Title = "Webhook", Content = "Тестовый пакет отправлен!", Duration = 3 })
+            SendWebhook()
+            Fluent:Notify({ Title = "Webhook", Content = "Тестовый пакет отправлен в Discord!", Duration = 3 })
         else
             Fluent:Notify({ Title = "Ошибка", Content = "Сначала вставьте URL вебхука!", Duration = 3 })
         end
     end
 })
 
+-- Вкладка 6: Настройки
 Tabs.Settings:AddKeybind("MenuBind", {
     Title = "Клавиша скрытия меню",
     Mode = "Toggle",
@@ -576,7 +532,7 @@ Tabs.Settings:AddKeybind("MenuBind", {
 
 Tabs.Settings:AddButton({
     Title = "🗑️ Полная выгрузка скрипта (Unload)",
-    Description = "Останавливает все потоки, удаляет хуки и закрывает GUI",
+    Description = "Останавливает потоки и удаляет интерфейс",
     Callback = function()
         Context:Unload()
     end
@@ -593,12 +549,12 @@ function Context:Unload()
     if setfpscap then setfpscap(60) end
     pcall(function() Window:Destroy() end)
     getgenv().SwordMonarchInstance = nil
-    print("[Sword Monarch]: Скрипт полностью выгружен из памяти.")
+    print("[Sword Monarch]: Выгружен из памяти.")
 end
 
 Window:SelectTab(1)
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "Скрипт успешно запущен! Автор: Abror. Скрытие: LeftControl.",
+    Content = "Скрипт v2.1 Native загружен! Автор: Abror. Меню: LeftControl.",
     Duration = 4
 })
