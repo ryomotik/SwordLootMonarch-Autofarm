@@ -4,7 +4,7 @@
     ⚡ Engine: Fluent UI (Amethyst Purple Edition)
     👑 Author: Ryomotik
     🛠️ Co-Developer: Antigravity Automation
-    🔬 Version: v2.7 Supercharged Auto-Loot Vacuum & Exact Game Protocol
+    🔬 Version: v2.8 100% Ground Walking & Anti-Kick Protection (Zero Airborne / Rate-Limit Safe)
     ═══════════════════════════════════════════════════════════════
 ]]
 
@@ -50,7 +50,7 @@ local Context = {
     StartTime = os.clock(),
     Settings = {
         AutoSwing = false,
-        SwingDelay = 0.08,
+        SwingDelay = 0.12,
         AutoStageRun = false,
         AutoMobs = false,
         CombatDistance = 8.0,
@@ -278,7 +278,9 @@ function Farm.GetDropRarity(dropObj)
     return 1
 end
 
--- Обработка и моментальный сбор конкретного дропа всеми доступными методами
+local LastLootPickupTime = 0
+
+-- Обработка и моментальный сбор конкретного дропа (без физического флинга и с защитой от rate-limit 15/sec)
 function Farm.ProcessDrop(obj)
     if not obj or not obj.Parent then return end
     local root = GetRootPart()
@@ -320,16 +322,14 @@ function Farm.ProcessDrop(obj)
 
     if not isAllowed then return end
 
-    -- МЕТОД 1: Физический вакуум (Loot Magnet)
-    -- Перемещает деталь прямо к персонажу, обнуляя дистанцию и проверки сервера
-    if Context.Settings.LootMagnet and part:IsA("BasePart") then
-        pcall(function()
-            part.CanCollide = false
-            part.CFrame = root.CFrame
-        end)
+    -- Защита от кика по превышению пакетов DropPickup (лимит сервера: max 15 в секунду)
+    local now = os.clock()
+    if (now - LastLootPickupTime) < 0.09 then
+        return
     end
+    LastLootPickupTime = now
 
-    -- МЕТОД 2: Активация ProximityPrompt и извлечение точного UID из памяти
+    -- Активация ProximityPrompt и сбор
     if prompt then
         pcall(function()
             prompt.HoldDuration = 0
@@ -337,7 +337,7 @@ function Farm.ProcessDrop(obj)
             prompt.RequiresLineOfSight = false
         end)
 
-        -- 2.1 Извлечение переменной a1 (UID) из замыкания Triggered
+        -- Извлечение UID из памяти замыкания Triggered
         local uid = nil
         local getconn = getconnections
         local getupv = (debug and debug.getupvalues) or getupvalues
@@ -362,19 +362,17 @@ function Farm.ProcessDrop(obj)
             uid = tonumber(rawUid) or tonumber(string.match(obj.Name, "%d+"))
         end
 
-        -- 2.2 Прямой сетевой вызов пакета подбора
+        -- Прямой сетевой вызов
         if uid then
             pcall(function()
                 Net.FireServer(Msg.DropPickup, uid)
             end)
         end
 
-        -- 2.3 Вызов сигнала Triggered через firesignal
         if firesignal then
             pcall(firesignal, prompt.Triggered)
         end
 
-        -- 2.4 Вызов через getconnections
         if getconn then
             pcall(function()
                 for _, conn in ipairs(getconn(prompt.Triggered)) do
@@ -384,22 +382,12 @@ function Farm.ProcessDrop(obj)
             end)
         end
 
-        -- 2.5 Эмуляция нажатия fireproximityprompt
         if fireproximityprompt then
             pcall(fireproximityprompt, prompt, 1, true)
             pcall(fireproximityprompt, prompt, 0, true)
             pcall(fireproximityprompt, prompt)
         end
-
-        -- 2.6 Нативный ввод InputHold
-        pcall(function()
-            prompt:InputHoldBegin()
-            task.defer(function()
-                pcall(function() prompt:InputHoldEnd() end)
-            end)
-        end)
     else
-        -- Если у объекта нет промпта, но есть UID
         local rawUid = obj:GetAttribute("UID") or obj:GetAttribute("uid") or obj:GetAttribute("Id")
         local uid = tonumber(rawUid) or tonumber(string.match(obj.Name, "%d+"))
         if uid then
@@ -457,7 +445,12 @@ function Farm.GetTargetEnemy(maxDistance)
     return bestTarget
 end
 
--- Наземный бой: только с мобами рядом
+local LastAttackTime = 0
+local LastSkill1Time = 0
+local LastSkill2Time = 0
+local LastSkill3Time = 0
+
+-- 100% Наземный бой: строго по земле, НИКАКОГО парения в воздухе и zero root.CFrame overwrites!
 function Farm.AttackTargetLegit(target)
     local root = GetRootPart()
     local hum = GetHumanoid()
@@ -468,69 +461,84 @@ function Farm.AttackTargetLegit(target)
     local toTarget = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
     local dist = toTarget.Magnitude
 
-    -- 1. Откат при критическом здоровье
-    if Context.Settings.SmartHeal and hum.Health > 0 and (hum.Health / hum.MaxHealth) < 0.35 then
+    -- 1. Failsafe отхила: отбегаем назад по земле, если HP < 30%
+    if Context.Settings.SmartHeal and hum.Health > 0 and (hum.Health / hum.MaxHealth) < 0.30 then
         if dist > 0.1 then
-            local runAwayPos = myPos - toTarget.Unit * 25
-            hum:MoveTo(runAwayPos)
+            local retreatPos = myPos - toTarget.Unit * 20
+            hum:MoveTo(retreatPos)
         end
-        task.wait(0.3)
+        task.wait(0.2)
         return
     end
 
     local desiredDist = Context.Settings.CombatDistance or 8.0
 
-    -- 2. Подход к мобу ногами
-    if dist > desiredDist + 2.5 then
+    -- 2. Наземное движение через Humanoid:MoveTo
+    -- НЕ ТРОГАЕМ root.CFrame! Физика Roblox держит ноги на земле 24/7!
+    if dist > desiredDist + 2.0 then
         hum:MoveTo(targetPos)
     elseif dist < desiredDist - 2.0 then
-        local backPos = myPos - toTarget.Unit * 3
-        hum:MoveTo(backPos)
+        local stepBack = myPos - toTarget.Unit * 3.0
+        hum:MoveTo(stepBack)
     else
-        -- На боевой дистанции: стрейф
-        local perp = Vector3.new(-toTarget.Z, 0, toTarget.X).Unit
-        local strafeDir = math.sin(os.clock() * 2.8)
-        local strafePos = targetPos + (toTarget.Unit * desiredDist) + (perp * strafeDir * 4.5)
-        hum:MoveTo(strafePos)
+        -- На дистанции удара стоим твердо на земле
+        hum:MoveTo(myPos)
     end
 
-    -- 3. Поворот лицом к врагу
-    local lookTarget = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
-    root.CFrame = CFrame.lookAt(myPos, lookTarget)
-
-    -- 4. Нативный Dash
+    -- 3. Нативная атака мечом и навыки с защитой от rate-limit (лимит сервера: max 30/сек)
     local now = os.clock()
-    if Context.Settings.AutoDash and (now - Context.LastDashTime) > 3.0 then
+    if (now - LastAttackTime) >= (Context.Settings.SwingDelay or 0.12) then
+        LastAttackTime = now
+        pcall(function()
+            SkillInput.Press(Enums.SkillSlot.NormalAttack)
+        end)
+    end
+
+    -- Навыки вызываются строго по таймингам, предотвращая кик за спам пакетами
+    if (now - LastSkill1Time) >= 3.2 then
+        LastSkill1Time = now
+        pcall(function()
+            SkillInput.Press(Enums.SkillSlot.Skill1)
+        end)
+    end
+
+    if (now - LastSkill2Time) >= 4.5 then
+        LastSkill2Time = now
+        pcall(function()
+            SkillInput.Press(Enums.SkillSlot.Skill2)
+        end)
+    end
+
+    if (now - LastSkill3Time) >= 6.0 then
+        LastSkill3Time = now
+        pcall(function()
+            SkillInput.Press(Enums.SkillSlot.Skill3)
+        end)
+    end
+
+    -- Нативный рывок раз в 4 секунды
+    if Context.Settings.AutoDash and (now - Context.LastDashTime) >= 4.0 then
         Context.LastDashTime = now
         pcall(function()
             SkillInput.Press(Enums.SkillSlot.Dash)
         end)
     end
-
-    -- 5. Атака мечом и всеми навыками
-    pcall(function()
-        SkillInput.Press(Enums.SkillSlot.NormalAttack)
-        SkillInput.Press(Enums.SkillSlot.Skill1)
-        SkillInput.Press(Enums.SkillSlot.Skill2)
-        SkillInput.Press(Enums.SkillSlot.Skill3)
-    end)
 end
 
--- ПРЯМОЙ БЕГ ВПЕРЁД ПО ДОРОГЕ (через ворота Подземелья в локации)
+-- ПРЯМОЙ БЕГ ВПЕРЁД ПО ДОРОГЕ (100% по земле)
 function Farm.WalkForward()
     local root = GetRootPart()
     local hum = GetHumanoid()
     if not root or not hum then return end
 
-    -- Осевая линия коридора подземелья: X = -1.2, направление Z строго уменьшается (-Z)
-    -- Персонаж бежит прямо по дороге вперёд
     local currentPos = root.Position
-    local nextPoint = Vector3.new(-1.2, currentPos.Y, currentPos.Z - 30)
+    -- Бежим строго вперед по дорожке вдоль оси -Z
+    local nextPoint = Vector3.new(-1.2, currentPos.Y, currentPos.Z - 25)
 
     hum:MoveTo(nextPoint)
 
-    -- Если упёрся в бордюр или ступеньку ворот — авто-прыжок
-    if root.Velocity.Magnitude < 1.0 and hum.FloorMaterial ~= Enum.Material.Air then
+    -- Если уперся в ступеньку или порог - обычный прыжок с земли
+    if root.Velocity.Magnitude < 0.8 and hum.FloorMaterial ~= Enum.Material.Air then
         hum.Jump = true
     end
 end
@@ -696,7 +704,7 @@ local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Ryomotik • v2.7 Loot Vacuum",
+    SubTitle = "by Ryomotik • v2.8 Ground Anti-Kick",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -956,6 +964,6 @@ end
 Window:SelectTab(2)
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "v2.7 Loot Vacuum загружен! Автор: Ryomotik. Меню: LeftControl.",
+    Content = "v2.8 Ground Anti-Kick загружен! Автор: Ryomotik. Меню: LeftControl.",
     Duration = 4
 })
