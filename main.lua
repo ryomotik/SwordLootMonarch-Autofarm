@@ -87,17 +87,17 @@ local Context = {
     Settings = {
         AutoSwing = false,
         SwingDelay = 0.24,
-        AutoStageRun = true,
+        AutoStageRun = false,
         AutoMobs = false,
         CombatDistance = 8.0,
-        MaxTargetRange = 45.0,
+        MaxTargetRange = 250.0,
         AutoDash = false,
         SmartHeal = true,
         AutoRebirth = false,
         RebirthDelay = 2.0,
         AutoEquipBest = false,
         EquipInterval = 8.0,
-        AutoLoot = true,
+        AutoLoot = false,
         LootAll = false,
         MinLootTier = 6,
         LootRadius = 60.0,
@@ -588,12 +588,9 @@ function Farm.AttackTargetLegit(target)
 
     -- 2. Движение ногами к мобу (по ЗЕМЛЕ через Raycast!)
     if dist > desiredDist + 1.5 then
-        -- Идём к врагу — цель на ЗЕМЛЕ
-        local walkTarget = GetGroundPosition(targetPos.X, targetPos.Z)
-        hum:MoveTo(walkTarget)
+        hum:MoveTo(targetPos)
     elseif dist < desiredDist - 2.5 then
-        -- Отходим назад
-        local stepBack = GetGroundPosition(myPos.X - flatDelta.Unit.X * 3.0, myPos.Z - flatDelta.Unit.Z * 3.0)
+        local stepBack = myPos - flatDelta.Unit * 3.0
         hum:MoveTo(stepBack)
     end
     -- На дистанции удара: НЕ вызываем Move/MoveTo — Humanoid сам остановится
@@ -638,18 +635,20 @@ function Farm.WalkForward()
 
     EnforceGroundState()
 
-    -- Точка шага по коридору (-Z направление), Y через Raycast
-    local nextZ = root.Position.Z - 28
-    local nextPoint = GetGroundPosition(-1.2, nextZ)
+    -- 1. Если есть враги впереди — идём прямо к ближайшему врагу!
+    local enemy = Farm.GetTargetEnemy(Context.Settings.MaxTargetRange or 250.0)
+    if enemy and enemy.Root then
+        hum:MoveTo(enemy.Root.Position)
+        return
+    end
 
-    hum:MoveTo(nextPoint)
-
-    -- Прыжок ТОЛЬКО если застрял (скорость ~0 и есть пол)
-    if root.AssemblyLinearVelocity.Magnitude < 0.5 and hum.FloorMaterial ~= Enum.Material.Air then
-        task.wait(0.3)
-        if root.AssemblyLinearVelocity.Magnitude < 0.5 then
-            hum.Jump = true
-        end
+    -- 2. Если врагов нет — идём вперёд по направлению коридора
+    local currentPos = root.Position
+    local lookDir = root.CFrame.LookVector * Vector3.new(1, 0, 1)
+    if lookDir.Magnitude > 0.1 then
+        hum:MoveTo(currentPos + lookDir.Unit * 30)
+    else
+        hum:MoveTo(Vector3.new(currentPos.X, currentPos.Y, currentPos.Z - 30))
     end
 end
 
@@ -832,7 +831,7 @@ SpawnThread(function()
                 task.wait(0.1)
             else
                 -- 3. Бой с мобами на пути
-                local target = (Context.Settings.AutoStageRun or Context.Settings.AutoMobs) and Farm.GetTargetEnemy(Context.Settings.MaxTargetRange or 45.0)
+                local target = (Context.Settings.AutoStageRun or Context.Settings.AutoMobs) and Farm.GetTargetEnemy(Context.Settings.MaxTargetRange or 250.0)
 
                 if target then
                     Farm.AttackTargetLegit(target)
@@ -952,7 +951,7 @@ Tabs.Main:AddSlider("SwingSpeed", {
 -- Вкладка 2: Прохождение Этапов
 local ToggleStageRun = Tabs.Stages:AddToggle("AutoStageRun", {
     Title = "🚀 Проход по локациям (Идти вперёд -> Убить мобов -> Дальше)",
-    Default = true
+    Default = false
 })
 ToggleStageRun:OnChanged(function(val)
     Context.Settings.AutoStageRun = val
@@ -982,9 +981,9 @@ Tabs.Stages:AddSlider("CombatDist", {
 
 Tabs.Stages:AddSlider("TargetRange", {
     Title = "Радиус обнаружения врагов рядом (Studs)",
-    Default = 45.0,
+    Default = 250.0,
     Min = 20.0,
-    Max = 80.0,
+    Max = 400.0,
     Rounding = 0,
     Callback = function(val) Context.Settings.MaxTargetRange = val end
 })
@@ -1004,7 +1003,7 @@ ToggleHeal:OnChanged(function(val) Context.Settings.SmartHeal = val end)
 -- Вкладка 3: Фильтр Лута
 local ToggleLoot = Tabs.Loot:AddToggle("AutoLoot", {
     Title = "👣 Подходить к ценному дропу (подождать 1 сек и идти дальше)",
-    Default = true
+    Default = false
 })
 ToggleLoot:OnChanged(function(val) Context.Settings.AutoLoot = val end)
 
