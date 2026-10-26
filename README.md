@@ -7,7 +7,7 @@
 ![Theme](https://img.shields.io/badge/UI-Amethyst%20Purple%20Fluent-8A2BE2?style=for-the-badge)
 ![Author](https://img.shields.io/badge/Author-Ryomotik-blueviolet?style=for-the-badge)
 
-**Идеальный скрипт для полной автоматизации прохождения подземелий, фарма силы и сбора лучшего лута.**
+**Идеальный скрипт для полной автоматизации прохождения подземелий, фарма силы и мгновенного сбора лучшего лута.**
 
 </div>
 
@@ -23,12 +23,13 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/ryomotik/SwordLootMon
 
 ---
 
-## ✨ Основной функционал
+## ✨ Основной функционал v2.7
 
 - 🟣 **Amethyst Purple Fluent UI**: Стильный фиолетовый неоновый интерфейс с плавным перетаскиванием окна (Smooth Dragging).
-- 🚶 **Smart Corridor Runner (v2.6)**: Персонаж уверенно идёт прямо по коридору этапов, заходит в комнаты и останавливается бить мобов только тогда, когда они находятся рядом (<45 studs).
+- 🧲 **Supercharged Auto-Loot Vacuum (v2.7)**: Полностью пересобранный модуль авто-лута! Мгновенный вакуум предметов к персонажу (`Loot Magnet`), перехват новых дропов на лету (`ChildAdded Event`), извлечение сетевых ID (`UID`) из памяти и 5-уровневый запуск сбора через `Net.FireServer(Msg.DropPickup)`, `firesignal`, `getconnections` и `fireproximityprompt`.
+- 💎 **Гибкий фильтр лута**: Возможность включить сбор абсолютно всего лута (`All Tiers`) или настроить фильтрацию от Мифика и выше (Mythic, Celestial, Secret, Divine, Zenith) + авто-подбор всех сундуков.
+- 🚶 **Smart Corridor Runner**: Персонаж уверенно идёт прямо по коридору этапов, заходит в комнаты и останавливается бить мобов только тогда, когда они рядом (<45 studs).
 - 🗡️ **100% Legit Ground Combat**: Полностью легитимный наземный бой (MoveTo + Dash). Никаких полётов, зависаний в воздухе и телепортов — **полная защита от киков (Error Code 267)**.
-- 💎 **Precise Above Mythic Loot Filter**: Умное сканирование выпавших предметов по световым спектрам `PointLight` и нативным цветам редкостей. Подбирает только ценный лут (Mythic, Celestial, Secret, Divine, Zenith) и сундуки боссов.
 - ⚡ **Native Remote Power Train**: Фарм силы через прямой сетевой протокол `TrainManualClick = 220` на максимальной скорости.
 - 🔄 **Auto Rebirth**: Автоматическое перерождение сразу при достижении нужного баланса.
 - 🛡️ **Auto Equip Best**: Автоматическая экипировка сильнейшего меча из инвентаря.

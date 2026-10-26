@@ -4,7 +4,7 @@
     ⚡ Engine: Fluent UI (Amethyst Purple Edition)
     👑 Author: Ryomotik
     🛠️ Co-Developer: Antigravity Automation
-    🔬 Version: v2.6 Straight Corridor Walk & Strict Combat Proximity
+    🔬 Version: v2.7 Supercharged Auto-Loot Vacuum & Exact Game Protocol
     ═══════════════════════════════════════════════════════════════
 ]]
 
@@ -62,8 +62,11 @@ local Context = {
         AutoEquipBest = false,
         EquipInterval = 8.0,
         AutoLoot = true,
-        LootInterval = 0.5,
+        LootAll = false, -- Собирать абсолютно весь дроп без ограничений
         MinLootTier = 6, -- 6 = Мифик и выше (Mythic, Celestial, Secret, Divine, Zenith)
+        LootMagnet = true, -- Физический вакуум/магнит дропов прямо к ногам
+        LootRadius = 85.0, -- Радиус сбора лута
+        LootInterval = 0.2, -- Высокая частота цикла сбора
         AntiAFK = true,
         FPSBoost = false,
         WebhookEnabled = false,
@@ -193,40 +196,56 @@ function Farm.ApplyNativeLootFilter(tier)
     end)
 end
 
--- Определение редкости по источнику света PointLight
-function Farm.GetDropRarity(dropPart)
-    if not dropPart then return 1 end
+-- Точнейшее определение редкости (по формуле игры из DropRenderer)
+function Farm.GetDropRarity(dropObj)
+    if not dropObj then return 1 end
 
-    local light = dropPart:FindFirstChildOfClass("PointLight")
+    -- 1. Поиск PointLight (в объекте или его потомках)
+    local light = dropObj:IsA("PointLight") and dropObj or dropObj:FindFirstChildOfClass("PointLight")
     if not light then
-        for _, child in ipairs(dropPart:GetChildren()) do
-            if child:IsA("BasePart") then
-                light = child:FindFirstChildOfClass("PointLight")
-                if light then break end
-            end
-        end
+        light = dropObj:FindFirstChildWhichIsA("PointLight", true)
     end
 
-    if light and light.Color and Enums and Enums.RarityColor then
-        local c = light.Color
-        local bestTier = 1
-        local minDiff = 999
-        for tier = 1, 10 do
-            local col = Enums.RarityColor[tier]
-            if col then
-                local diff = math.abs(c.R - col.R) + math.abs(c.G - col.G) + math.abs(c.B - col.B)
-                if diff < minDiff then
-                    minDiff = diff
-                    bestTier = tier
+    if light then
+        -- Точнейшая формула игры: Range = Rarity + 6
+        if light.Range and light.Range >= 6.5 and light.Range <= 16.5 then
+            local r = math.round(light.Range - 6)
+            if r >= 1 and r <= 10 then
+                return r
+            end
+        end
+
+        -- Формула яркости игры: Brightness = Rarity * 0.15 + 0.8
+        if light.Brightness and light.Brightness >= 0.85 and light.Brightness <= 2.5 then
+            local r = math.round((light.Brightness - 0.8) / 0.15)
+            if r >= 1 and r <= 10 then
+                return r
+            end
+        end
+
+        -- Сравнение с таблицей цветов Enums.RarityColor
+        if light.Color and Enums and Enums.RarityColor then
+            local c = light.Color
+            local bestTier = 1
+            local minDiff = 999
+            for tier = 1, 10 do
+                local col = Enums.RarityColor[tier]
+                if col then
+                    local diff = math.abs(c.R - col.R) + math.abs(c.G - col.G) + math.abs(c.B - col.B)
+                    if diff < minDiff then
+                        minDiff = diff
+                        bestTier = tier
+                    end
                 end
             end
-        end
-        if minDiff < 0.28 then
-            return bestTier
+            if minDiff < 0.45 then
+                return bestTier
+            end
         end
     end
 
-    local prompt = dropPart:FindFirstChildOfClass("ProximityPrompt", true)
+    -- 2. Проверка текста в ProximityPrompt или названии
+    local prompt = dropObj:FindFirstChildOfClass("ProximityPrompt", true)
     if prompt then
         local text = string.lower(prompt.ObjectText .. " " .. prompt.ActionText)
         if string.find(text, "zenith") then return 10
@@ -245,38 +264,151 @@ function Farm.GetDropRarity(dropPart)
     return 1
 end
 
--- Сбор лута: подбор через Net.FireServer по UID и ProximityPrompt
-function Farm.CollectLoot()
-    local drops = Workspace:FindFirstChild("DropsClient")
-    if not drops then return end
-
+-- Обработка и моментальный сбор конкретного дропа всеми доступными методами
+function Farm.ProcessDrop(obj)
+    if not obj or not obj.Parent then return end
     local root = GetRootPart()
     if not root then return end
 
-    local minTier = Context.Settings.MinLootTier or 6
+    local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
+    if not part then return end
 
-    for _, obj in ipairs(drops:GetChildren()) do
-        local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart")
-        if part then
-            local dist = (part.Position - root.Position).Magnitude
-            if dist < 65 then
-                local rarity = Farm.GetDropRarity(part)
-                local name = string.lower(obj.Name)
-                local isBossChest = string.find(name, "boss") or string.find(name, "chest")
+    local dist = (part.Position - root.Position).Magnitude
+    local maxRadius = Context.Settings.LootRadius or 85.0
+    if dist > maxRadius then return end
 
-                if rarity >= minTier or isBossChest then
-                    local uid = tonumber(string.match(obj.Name, "%d+"))
-                    if uid then
-                        pcall(function()
-                            Net.FireServer(Msg.DropPickup, uid)
-                        end)
+    -- Определение редкости и сундуков
+    local rarity = Farm.GetDropRarity(obj)
+    local isBossOrChest = false
+    local objNameLower = string.lower(obj.Name)
+    if string.find(objNameLower, "chest") or string.find(objNameLower, "boss") or string.find(objNameLower, "box") then
+        isBossOrChest = true
+    end
+
+    local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
+    if prompt then
+        local pText = string.lower(prompt.ObjectText .. " " .. prompt.ActionText)
+        if string.find(pText, "chest") or string.find(pText, "boss") or string.find(pText, "box") or string.find(pText, "сундук") then
+            isBossOrChest = true
+        end
+    end
+
+    -- Фильтрация лута
+    local isAllowed = false
+    if Context.Settings.LootAll or isBossOrChest then
+        isAllowed = true
+    else
+        local minTier = Context.Settings.MinLootTier or 6
+        if rarity >= minTier then
+            isAllowed = true
+        end
+    end
+
+    if not isAllowed then return end
+
+    -- МЕТОД 1: Физический вакуум (Loot Magnet)
+    -- Перемещает деталь прямо к персонажу, обнуляя дистанцию и проверки сервера
+    if Context.Settings.LootMagnet and part:IsA("BasePart") then
+        pcall(function()
+            part.CanCollide = false
+            part.CFrame = root.CFrame
+        end)
+    end
+
+    -- МЕТОД 2: Активация ProximityPrompt и извлечение точного UID из памяти
+    if prompt then
+        pcall(function()
+            prompt.HoldDuration = 0
+            prompt.MaxActivationDistance = 99999
+            prompt.RequiresLineOfSight = false
+        end)
+
+        -- 2.1 Извлечение переменной a1 (UID) из замыкания Triggered
+        local uid = nil
+        local getconn = getconnections
+        local getupv = (debug and debug.getupvalues) or getupvalues
+        if getconn and getupv then
+            pcall(function()
+                for _, conn in ipairs(getconn(prompt.Triggered)) do
+                    if conn.Function then
+                        for _, val in pairs(getupv(conn.Function)) do
+                            if type(val) == "number" and val > 0 and val < 1000000000 then
+                                uid = val
+                                break
+                            end
+                        end
                     end
-                    local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
-                    if prompt then
-                        pcall(fireproximityprompt, prompt)
-                    end
+                    if uid then break end
                 end
-            end
+            end)
+        end
+
+        if not uid then
+            local rawUid = obj:GetAttribute("UID") or obj:GetAttribute("uid") or obj:GetAttribute("Id")
+            uid = tonumber(rawUid) or tonumber(string.match(obj.Name, "%d+"))
+        end
+
+        -- 2.2 Прямой сетевой вызов пакета подбора
+        if uid then
+            pcall(function()
+                Net.FireServer(Msg.DropPickup, uid)
+            end)
+        end
+
+        -- 2.3 Вызов сигнала Triggered через firesignal
+        if firesignal then
+            pcall(firesignal, prompt.Triggered)
+        end
+
+        -- 2.4 Вызов через getconnections
+        if getconn then
+            pcall(function()
+                for _, conn in ipairs(getconn(prompt.Triggered)) do
+                    if conn.Fire then conn:Fire() end
+                    if conn.Function then conn.Function() end
+                end
+            end)
+        end
+
+        -- 2.5 Эмуляция нажатия fireproximityprompt
+        if fireproximityprompt then
+            pcall(fireproximityprompt, prompt, 1, true)
+            pcall(fireproximityprompt, prompt, 0, true)
+            pcall(fireproximityprompt, prompt)
+        end
+
+        -- 2.6 Нативный ввод InputHold
+        pcall(function()
+            prompt:InputHoldBegin()
+            task.defer(function()
+                pcall(function() prompt:InputHoldEnd() end)
+            end)
+        end)
+    else
+        -- Если у объекта нет промпта, но есть UID
+        local rawUid = obj:GetAttribute("UID") or obj:GetAttribute("uid") or obj:GetAttribute("Id")
+        local uid = tonumber(rawUid) or tonumber(string.match(obj.Name, "%d+"))
+        if uid then
+            pcall(function()
+                Net.FireServer(Msg.DropPickup, uid)
+            end)
+        end
+    end
+end
+
+-- Сбор всех предметов в мире
+function Farm.CollectLoot()
+    local drops = Workspace:FindFirstChild("DropsClient")
+    if drops then
+        for _, obj in ipairs(drops:GetChildren()) do
+            Farm.ProcessDrop(obj)
+        end
+    end
+
+    local altDrops = Workspace:FindFirstChild("Drops")
+    if altDrops and altDrops ~= drops then
+        for _, obj in ipairs(altDrops:GetChildren()) do
+            Farm.ProcessDrop(obj)
         end
     end
 end
@@ -389,11 +521,34 @@ function Farm.WalkForward()
     end
 end
 
--- 6. СЛУЖЕБНЫЕ ХУКИ
+-- 6. СЛУЖЕБНЫЕ ХУКИ И ИНСТАНТ-СБОР ЛУТА (ChildAdded Event)
 TrackConnection(LocalPlayer.Idled:Connect(function()
     if Context.Settings.AntiAFK then
         VirtualUser:CaptureController()
         VirtualUser:ClickButton2(Vector2.new(0, 0))
+    end
+end))
+
+local function HookDropsFolder(folder)
+    if not folder then return end
+    TrackConnection(folder.ChildAdded:Connect(function(child)
+        if Context.Settings.AutoLoot then
+            task.defer(function()
+                task.wait(0.04)
+                Farm.ProcessDrop(child)
+            end)
+        end
+    end))
+end
+
+local existingDrops = Workspace:FindFirstChild("DropsClient")
+if existingDrops then
+    HookDropsFolder(existingDrops)
+end
+
+TrackConnection(Workspace.ChildAdded:Connect(function(child)
+    if child.Name == "DropsClient" or child.Name == "Drops" then
+        HookDropsFolder(child)
     end
 end))
 
@@ -527,7 +682,7 @@ local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Ryomotik • v2.6 Runner",
+    SubTitle = "by Ryomotik • v2.7 Loot Vacuum",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -629,40 +784,85 @@ local ToggleHeal = Tabs.Stages:AddToggle("SmartHeal", {
 })
 ToggleHeal:OnChanged(function(val) Context.Settings.SmartHeal = val end)
 
--- Вкладка 3: Фильтр Лута
+-- Вкладка 3: Фильтр и Вакуум Лута
+local ToggleLoot = Tabs.Loot:AddToggle("AutoLoot", {
+    Title = "⚡ Авто-сбор лута (Инстант подбор)",
+    Default = true
+})
+ToggleLoot:OnChanged(function(val) Context.Settings.AutoLoot = val end)
+
+local ToggleLootAll = Tabs.Loot:AddToggle("LootAll", {
+    Title = "🌟 Собирать абсолютно ВСЁ без фильтра (All Tiers)",
+    Default = false
+})
+ToggleLootAll:OnChanged(function(val)
+    Context.Settings.LootAll = val
+    if val then
+        Fluent:Notify({
+            Title = "Сбор лута",
+            Content = "Включен сбор абсолютно всех предметов без ограничений!",
+            Duration = 3
+        })
+    end
+end)
+
 local DropdownLoot = Tabs.Loot:AddDropdown("LootFilterDropdown", {
-    Title = "Минимальная редкость сбора дропа",
+    Title = "Минимальная редкость (если 'Всё' выключено)",
     Values = {
-        "Мифик и выше (Mythic, Celestial, Secret, Divine)",
-        "Строго выше мификов (Celestial, Secret, Divine, Zenith)",
-        "Легендарный и выше (Legendary+)",
-        "Собирать всё подряд (All Drops)"
+        "Мифик и выше (Mythic+) [Tier 6]",
+        "Строго выше мификов (Celestial+) [Tier 7]",
+        "Легендарный и выше (Legendary+) [Tier 5]",
+        "Эпический и выше (Epic+) [Tier 4]",
+        "Редкий и выше (Rare+) [Tier 3]",
+        "Обычный и выше (Common+ / Все) [Tier 1]"
     },
-    Default = "Мифик и выше (Mythic, Celestial, Secret, Divine)"
+    Default = "Мифик и выше (Mythic+) [Tier 6]"
 })
 DropdownLoot:OnChanged(function(val)
-    if val == "Мифик и выше (Mythic, Celestial, Secret, Divine)" then
+    if string.find(val, "Mythic+") then
         Context.Settings.MinLootTier = 6
-    elseif val == "Строго выше мификов (Celestial, Secret, Divine, Zenith)" then
+    elseif string.find(val, "Celestial+") then
         Context.Settings.MinLootTier = 7
-    elseif val == "Легендарный и выше (Legendary+)" then
+    elseif string.find(val, "Legendary+") then
         Context.Settings.MinLootTier = 5
+    elseif string.find(val, "Epic+") then
+        Context.Settings.MinLootTier = 4
+    elseif string.find(val, "Rare+") then
+        Context.Settings.MinLootTier = 3
     else
         Context.Settings.MinLootTier = 1
     end
     Farm.ApplyNativeLootFilter(Context.Settings.MinLootTier)
     Fluent:Notify({
         Title = "Фильтр дропа",
-        Content = "Установлен фильтр: " .. val,
+        Content = "Установлен порог редкости: " .. val,
         Duration = 3
     })
 end)
 
-local ToggleLoot = Tabs.Loot:AddToggle("AutoLoot", {
-    Title = "Включить авто-сбор отфильтрованного лута",
+local ToggleMagnet = Tabs.Loot:AddToggle("LootMagnet", {
+    Title = "🧲 Вакуум / Магнит дропов прямо к персонажу",
     Default = true
 })
-ToggleLoot:OnChanged(function(val) Context.Settings.AutoLoot = val end)
+ToggleMagnet:OnChanged(function(val) Context.Settings.LootMagnet = val end)
+
+Tabs.Loot:AddSlider("LootRadius", {
+    Title = "Радиус захвата лута (Studs)",
+    Default = 85.0,
+    Min = 30.0,
+    Max = 200.0,
+    Rounding = 0,
+    Callback = function(val) Context.Settings.LootRadius = val end
+})
+
+Tabs.Loot:AddSlider("LootInterval", {
+    Title = "Частота проверки лута (сек)",
+    Default = 0.2,
+    Min = 0.05,
+    Max = 1.0,
+    Rounding = 2,
+    Callback = function(val) Context.Settings.LootInterval = val end
+})
 
 -- Вкладка 4: Прокачка
 local ToggleRebirth = Tabs.Progress:AddToggle("AutoRebirth", { Title = "Авто-перерождение (PlayerRebirth)", Default = false })
@@ -754,6 +954,6 @@ end
 Window:SelectTab(2)
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "v2.6 Runner загружен! Автор: Ryomotik. Меню: LeftControl.",
+    Content = "v2.7 Loot Vacuum загружен! Автор: Ryomotik. Меню: LeftControl.",
     Duration = 4
 })
