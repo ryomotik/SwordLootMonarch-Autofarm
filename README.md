@@ -17,16 +17,15 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/ryomotik/SwordLootMon
 
 ---
 
-## ✨ Возможности и функционал v2.4
+## ✨ Возможности и функционал v2.5
 
-- 🟣 **Amethyst Purple GUI**: Стильный неоново-фиолетовый интерфейс с плавным перетаскиванием (Smooth Dragging).
-- 🚶 **100% Legit Ground Combat**: Наземный бой без полётов и телепортов (обход Error Code 267 и детектов античита).
-- 🚀 **Auto Stage Progression**: Автоматический бег вперёд по коридорам этапов и зачистка всех волн мобов.
-- 💎 **Above Mythic Loot Filter**: Умный подбор дропа — собирает исключительно предметы выше мифической редкости (Divine, Secret, Celestial, Monarch, сундуки боссов).
+- 🟣 **Amethyst Purple GUI**: Стильный неоново-фиолетовый интерфейс с плавным перемещением (Smooth Dragging).
+- 🚶 **100% Legit Ground Combat**: Наземный бой без полётов и телепортов (обход Error Code 267).
+- 🚀 **Smart Stages Progression**: Полный цикл прохождения — из Лобби на чекпоинт этапов, прохождение коридоров и зачистка всех волн.
+- 💎 **Precise Above Mythic Loot Filter**: Определение редкости по световым лучам `PointLight` и нативному `Enums.RarityColor` (собирает Mythic, Celestial, Secret, Divine, Zenith и сундуки боссов).
 - 🗡️ **Auto Swing / Train Power**: Фарм силы через прямой сетевой протокол `TrainManualClick = 220`.
 - 🔄 **Auto Rebirth**: Автоматическое перерождение без прерывания фарма.
-- 🛡️ **Auto Equip Best**: Экипировка сильнейшего меча в инвентаре через `InvEquipBest`.
-- 🔁 **Failsafe System**: Защита от случайных падений и багов карты.
+- 🛡️ **Auto Equip Best**: Экипировка сильнейшего меча через `InvEquipBest`.
 - 🛡️ **Built-in Anti-AFK**: Защита от 20-минутного AFK-кика через `VirtualUser`.
 - 📉 **FPS Boost**: Отключение 3D-рендеринга для тихого фарма 24/7.
 - 📡 **Discord Webhook**: Автоматические отчёты о силе, балансе, победах и статусе фарма.
@@ -35,8 +34,6 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/ryomotik/SwordLootMon
 ---
 
 ## 📦 Как выгрузить в свой GitHub репозиторий
-
-Если репозиторий `SwordLootMonarch-Autofarm` создан на GitHub у пользователя `ryomotik`:
 
 ```bash
 cd C:\Users\abror\.gemini\antigravity\scratch\SwordLootMonarch-Autofarm

@@ -4,7 +4,7 @@
     ⚡ Engine: Fluent UI (Amethyst Purple Edition)
     👑 Author: Ryomotik
     🛠️ Co-Developer: Antigravity Automation
-    🔬 Version: v2.4 Smooth Draggable & Ground Combat
+    🔬 Version: v2.5 Smart Stages & Precise Loot Filter
     ═══════════════════════════════════════════════════════════════
 ]]
 
@@ -32,6 +32,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared", 15)
 local Net = require(Shared:WaitForChild("Net"):WaitForChild("Net"))
 local Protocol = require(Shared:WaitForChild("Net"):WaitForChild("Protocol"))
 local Enums = require(Shared:WaitForChild("Enums"))
+local TeleportConfig = require(Shared:WaitForChild("Config"):WaitForChild("Teleport"))
 local Msg = Protocol.Msg
 
 local ClientScripts = LocalPlayer:WaitForChild("PlayerScripts", 15):WaitForChild("Client", 15)
@@ -47,7 +48,8 @@ local Context = {
     Threads = {},
     LastFarmPosition = nil,
     LastDashTime = 0,
-    LastStageTeleport = 0,
+    LastLootTime = 0,
+    LastStageAction = 0,
     StartTime = os.clock(),
     Settings = {
         AutoSwing = false,
@@ -62,10 +64,9 @@ local Context = {
         AutoEquipBest = false,
         EquipInterval = 8.0,
         AutoLoot = true,
-        LootInterval = 0.8,
-        MinLootTier = 7, -- 7 = Выше мификов (Divine / Secret / Celestial+), 6 = Mythic+
+        LootInterval = 0.6,
+        MinLootTier = 6, -- 6 = Мифик и выше (Mythic, Celestial, Secret, Divine, Zenith)
         AutoStage = true,
-        StageInterval = 5.0,
         AntiAFK = true,
         FPSBoost = false,
         WebhookEnabled = false,
@@ -74,22 +75,6 @@ local Context = {
     }
 }
 getgenv().SwordMonarchInstance = Context
-
--- Таблица редкостей для фильтрации лута
-local RarityTiers = {
-    ["common"] = 1,
-    ["uncommon"] = 2,
-    ["rare"] = 3,
-    ["epic"] = 4,
-    ["legendary"] = 5,
-    ["mythic"] = 6,
-    ["divine"] = 7,
-    ["celestial"] = 8,
-    ["secret"] = 9,
-    ["monarch"] = 10,
-    ["godly"] = 11,
-    ["ancient"] = 12
-}
 
 -- 4. СЛУЖЕБНЫЕ ФУНКЦИИ
 local function TrackConnection(conn)
@@ -132,10 +117,11 @@ local function GetStats()
             Coins = data.Coins or 0,
             Rebirth = data.Rebirth or 0,
             Level = data.Level or 1,
-            Stage = data.CareerMaxStage or 1
+            Stage = data.Stage,
+            CareerMaxStage = data.CareerMaxStage or 1
         }
     end
-    return { Power = 0, Coins = 0, Rebirth = 0, Level = 1, Stage = 1 }
+    return { Power = 0, Coins = 0, Rebirth = 0, Level = 1, Stage = nil, CareerMaxStage = 1 }
 end
 
 -- Плавное и стабильное перетаскивание окна (Smooth Dragging)
@@ -215,51 +201,61 @@ function Farm.ApplyNativeLootFilter(tier)
     end)
 end
 
--- Проверка редкости выпавшего предмета перед подбором
-function Farm.IsLootAllowed(dropPart)
-    local minTier = Context.Settings.MinLootTier
-    if minTier <= 1 then return true end
+-- Точное определение редкости выпавшего предмета (по PointLight и цвету Enums)
+function Farm.GetDropRarity(dropPart)
+    if not dropPart then return 1 end
 
-    -- 1. Проверка через атрибуты
-    local tierAttr = dropPart:GetAttribute("Rarity") or dropPart:GetAttribute("Tier")
-    if type(tierAttr) == "number" then
-        return tierAttr >= minTier
-    end
-
-    -- 2. Проверка через текст в ProximityPrompt
-    local prompt = dropPart:FindFirstChildOfClass("ProximityPrompt") or dropPart:FindFirstChild("PickupPrompt")
-    local text = prompt and (prompt.ObjectText .. " " .. prompt.ActionText) or dropPart.Name
-    local lowerText = string.lower(text)
-
-    for name, tier in pairs(RarityTiers) do
-        if string.find(lowerText, name) then
-            return tier >= minTier
+    -- 1. Поиск PointLight (создаётся нативным DropRenderer с цветом Enums.RarityColor)
+    local light = dropPart:FindFirstChildOfClass("PointLight")
+    if not light then
+        for _, child in ipairs(dropPart:GetChildren()) do
+            if child:IsA("BasePart") then
+                light = child:FindFirstChildOfClass("PointLight")
+                if light then break end
+            end
         end
     end
 
-    -- 3. Проверка через цвет светового луча дропа (LootBeam)
-    local beam = dropPart:FindFirstChildOfClass("Beam") or dropPart:FindFirstChild("LootBeam")
-    if beam and beam.Color and #beam.Color.Keypoints > 0 then
-        local col = beam.Color.Keypoints[1].Value
-        local isMythic = (col.R > 0.75 and col.G < 0.35 and col.B < 0.35)
-        local isAboveMythic = (col.R > 0.65 and col.B > 0.65) or (col.G > 0.75 and col.B > 0.75) or (col.R > 0.85 and col.G > 0.85 and col.B > 0.85)
-
-        if minTier > 6 then
-            return isAboveMythic
-        elseif minTier == 6 then
-            return isMythic or isAboveMythic
+    if light and light.Color and Enums and Enums.RarityColor then
+        local c = light.Color
+        local bestTier = 1
+        local minDiff = 999
+        for tier = 1, 10 do
+            local col = Enums.RarityColor[tier]
+            if col then
+                local diff = math.abs(c.R - col.R) + math.abs(c.G - col.G) + math.abs(c.B - col.B)
+                if diff < minDiff then
+                    minDiff = diff
+                    bestTier = tier
+                end
+            end
+        end
+        if minDiff < 0.28 then
+            return bestTier
         end
     end
 
-    -- Сундуки боссов и реликвии всегда ценны
-    if string.find(lowerText, "boss") or string.find(lowerText, "chest") or string.find(lowerText, "curse") then
-        return true
+    -- 2. Проверка текста на ProximityPrompt
+    local prompt = dropPart:FindFirstChildOfClass("ProximityPrompt", true)
+    if prompt then
+        local text = string.lower(prompt.ObjectText .. " " .. prompt.ActionText)
+        if string.find(text, "zenith") then return 10
+        elseif string.find(text, "divine") then return 9
+        elseif string.find(text, "secret") then return 8
+        elseif string.find(text, "celestial") then return 7
+        elseif string.find(text, "mythic") then return 6
+        elseif string.find(text, "legendary") then return 5
+        elseif string.find(text, "epic") then return 4
+        elseif string.find(text, "rare") then return 3
+        elseif string.find(text, "uncommon") then return 2
+        elseif string.find(text, "common") then return 1
+        end
     end
 
-    return false
+    return 1
 end
 
--- Умный сбор лута (Фильтрация: выше мификов)
+-- Умный сбор лута (Фильтрация: мифики и выше)
 function Farm.CollectLoot()
     local drops = Workspace:FindFirstChild("DropsClient")
     if not drops then return end
@@ -267,28 +263,33 @@ function Farm.CollectLoot()
     local root = GetRootPart()
     if not root then return end
 
-    for _, desc in ipairs(drops:GetDescendants()) do
-        if desc:IsA("ProximityPrompt") then
-            local part = desc.Parent
-            if part and part:IsA("BasePart") then
-                local dist = (part.Position - root.Position).Magnitude
-                if dist < 50 then
-                    if Farm.IsLootAllowed(part) then
-                        pcall(fireproximityprompt, desc)
+    local minTier = Context.Settings.MinLootTier or 6
+
+    for _, obj in ipairs(drops:GetChildren()) do
+        local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart")
+        if part then
+            local dist = (part.Position - root.Position).Magnitude
+            if dist < 65 then
+                local rarity = Farm.GetDropRarity(part)
+                local name = string.lower(obj.Name)
+                local isBossChest = string.find(name, "boss") or string.find(name, "chest")
+
+                if rarity >= minTier or isBossChest then
+                    -- 1. Вызов нативного сетевого события подбора по UID
+                    local uid = tonumber(string.match(obj.Name, "%d+"))
+                    if uid then
+                        pcall(function()
+                            Net.FireServer(Msg.DropPickup, uid)
+                        end)
+                    end
+                    -- 2. Активация ProximityPrompt
+                    local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
+                    if prompt then
+                        pcall(fireproximityprompt, prompt)
                     end
                 end
             end
         end
-    end
-end
-
--- Авто-переход на следующий этап
-function Farm.TeleportMaxStage()
-    local stats = GetStats()
-    if stats.Stage and stats.Stage > 0 then
-        pcall(function()
-            Net.InvokeServer(Msg.StageTeleport, stats.Stage)
-        end)
     end
 end
 
@@ -319,7 +320,7 @@ function Farm.GetTargetEnemy()
     return bestTarget
 end
 
--- 100% ЛЕГИТИМНЫЙ БОЙ НА ЗЕМЛЕ (Без полёта, без телепортов, без приклеивания)
+-- 100% Легитимный бой на земле (Без полёта, без кика Error 267)
 function Farm.AttackTargetLegit(target)
     local root = GetRootPart()
     local hum = GetHumanoid()
@@ -330,7 +331,7 @@ function Farm.AttackTargetLegit(target)
     local toTarget = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
     local dist = toTarget.Magnitude
 
-    -- 1. Безопасный откат при низком здоровье (<35% HP)
+    -- 1. Откат при низком здоровье (<35% HP)
     if Context.Settings.SmartHeal and hum.Health > 0 and (hum.Health / hum.MaxHealth) < 0.35 then
         if dist > 0.1 then
             local runAwayPos = myPos - toTarget.Unit * 25
@@ -342,25 +343,24 @@ function Farm.AttackTargetLegit(target)
 
     local desiredDist = Context.Settings.CombatDistance or 8.5
 
-    -- 2. Естественное перемещение по земле ногами
+    -- 2. Наземное перемещение
     if dist > desiredDist + 3 then
         hum:MoveTo(targetPos)
     elseif dist < desiredDist - 2 then
         local backPos = myPos - toTarget.Unit * 3
         hum:MoveTo(backPos)
     else
-        -- На боевой дистанции: стрейф влево-вправо по земле
         local perp = Vector3.new(-toTarget.Z, 0, toTarget.X).Unit
         local strafeDir = math.sin(os.clock() * 2.8)
         local strafePos = targetPos + (toTarget.Unit * desiredDist) + (perp * strafeDir * 5)
         hum:MoveTo(strafePos)
     end
 
-    -- 3. Плавный поворот лицом к врагу (Строго по горизонтали, Y не меняется!)
+    -- 3. Плавный поворот к врагу
     local lookTarget = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
     root.CFrame = CFrame.lookAt(myPos, lookTarget)
 
-    -- 4. Нативный Dash на земле для сброса агро и уклонения
+    -- 4. Нативный Dash на земле
     local now = os.clock()
     if Context.Settings.AutoDash and (now - Context.LastDashTime) > 3.0 then
         Context.LastDashTime = now
@@ -378,32 +378,90 @@ function Farm.AttackTargetLegit(target)
     end)
 end
 
--- Естественный бег вперёд по этапу
-function Farm.AdvanceStageForward()
+-- Автопрохождение и продвижение по этапам (Stages Progression)
+function Farm.AdvanceStage()
     local root = GetRootPart()
     local hum = GetHumanoid()
     if not root or not hum then return end
 
-    local portalPos = nil
-    local portalNames = { "StageGate", "Portal", "StageTeleporter", "Gate", "Finish", "NextStage" }
-    for _, name in ipairs(portalNames) do
-        local obj = Workspace:FindFirstChild(name, true)
-        if obj and (obj:IsA("BasePart") or obj:IsA("Model")) then
-            local pos = obj:IsA("Model") and (obj.PrimaryPart and obj.PrimaryPart.Position or obj:GetPivot().Position) or obj.Position
-            if (pos - root.Position).Magnitude < 180 then
-                portalPos = pos
-                break
+    local map = Workspace:FindFirstChild("Map")
+    local stagesFolder = map and map:FindFirstChild("Stages")
+    local lobby = map and map:FindFirstChild("Lobby")
+
+    local runMaxClear = LocalPlayer:GetAttribute("RunMaxClear") or 0
+    local currentStageNum = runMaxClear + 1
+
+    -- Определяем, находится ли игрок в Лобби или уже на этапах
+    local isAtStages = root.Position.Z < 250
+
+    if not isAtStages then
+        -- ИГРОК В ЛОББИ: Направляемся к StageTeleporter
+        local stats = GetStats()
+        local bestCheckpoint = 1
+        if TeleportConfig and TeleportConfig.Best and stats.CareerMaxStage then
+            local bestTable = TeleportConfig.Best(stats.CareerMaxStage)
+            if bestTable and (bestTable.Stage or bestTable.Id) then
+                bestCheckpoint = bestTable.Stage or bestTable.Id
             end
         end
+
+        local stageTeleporter = lobby and lobby:FindFirstChild("StageTeleporter")
+        if stageTeleporter then
+            local padPos = stageTeleporter:IsA("Model") and stageTeleporter:GetPivot().Position or stageTeleporter.Position
+            local distToPad = (Vector3.new(padPos.X, root.Position.Y, padPos.Z) - root.Position).Magnitude
+
+            if distToPad > 12 then
+                hum:MoveTo(padPos)
+            else
+                -- Стоим на телепортере: вызываем телепорт на валидный чекпоинт
+                local now = os.clock()
+                if (now - Context.LastStageAction) > 2.5 then
+                    Context.LastStageAction = now
+                    pcall(function()
+                        Net.InvokeServer(Msg.StageTeleport, bestCheckpoint)
+                    end)
+                end
+            end
+        else
+            -- Если телепортер не найден, бежим к первому этапу
+            local s1 = stagesFolder and stagesFolder:FindFirstChild("1")
+            if s1 and s1:FindFirstChild("Spawn") then
+                hum:MoveTo(s1.Spawn.Position)
+            end
+        end
+        return
     end
 
-    if portalPos then
-        hum:MoveTo(portalPos)
-    else
-        local lookDir = root.CFrame.LookVector * Vector3.new(1, 0, 1)
-        if lookDir.Magnitude > 0.05 then
-            hum:MoveTo(root.Position + lookDir.Unit * 30)
+    -- ИГРОК НА ЭТАПАХ: Продвижение по цепочке Stage 1 -> 2 -> 3 ...
+    local currentStageFolder = stagesFolder and stagesFolder:FindFirstChild(tostring(currentStageNum))
+    if currentStageFolder then
+        local levelArea = currentStageFolder:FindFirstChild("LevelArea") or currentStageFolder:FindFirstChild("BattleArea")
+        local spawnPart = currentStageFolder:FindFirstChild("Spawn")
+        local winArea = currentStageFolder:FindFirstChild("WinArea")
+
+        local areaPos = (levelArea and levelArea.Position) or (spawnPart and spawnPart.Position)
+        if areaPos then
+            local distToArea = (Vector3.new(areaPos.X, root.Position.Y, areaPos.Z) - root.Position).Magnitude
+            if distToArea > 16 then
+                -- Бежим в зону боя текущего этапа
+                hum:MoveTo(areaPos)
+            else
+                -- Если стоим в зоне боя, но мобов нет — бежим в сторону WinArea / следующего этапа
+                local nextStageFolder = stagesFolder:FindFirstChild(tostring(currentStageNum + 1))
+                if nextStageFolder and nextStageFolder:FindFirstChild("Spawn") then
+                    hum:MoveTo(nextStageFolder.Spawn.Position)
+                elseif winArea then
+                    local wPos = winArea:IsA("Model") and winArea:GetPivot().Position or winArea.Position
+                    hum:MoveTo(wPos)
+                else
+                    -- Бег по коридору этапов в сторону убывания Z
+                    hum:MoveTo(root.Position + Vector3.new(0, 0, -28))
+                end
+            end
         end
+    else
+        -- За пределами последнего известного этапа: бег вперед
+        hum:MoveTo(root.Position + Vector3.new(0, 0, -30))
     end
 end
 
@@ -415,19 +473,15 @@ TrackConnection(LocalPlayer.Idled:Connect(function()
     end
 end))
 
--- Перехват StageCleared
+-- Перехват StageCleared для моментального сбора лута
 local function SetupGameEvents()
     local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
     local MainEvent = Remotes and Remotes:FindFirstChild("MainEvent")
     if MainEvent then
         TrackConnection(MainEvent.OnClientEvent:Connect(function(msgId, ...)
             if msgId == Msg.StageCleared then
-                task.delay(1.0, function()
+                task.delay(0.5, function()
                     Farm.CollectLoot()
-                    if Context.Settings.AutoStage or Context.Settings.AutoStageRun then
-                        task.wait(0.5)
-                        Farm.TeleportMaxStage()
-                    end
                 end)
             end
         end))
@@ -449,7 +503,7 @@ local function SendWebhook()
     local payload = {
         embeds = {{
             title = "⚔️ [+1 Sword Loot Monarch] • Отчёт автофарма",
-            color = 9127187, -- Amethyst Purple Hex
+            color = 9127187,
             fields = {
                 { name = "👑 Разработчик", value = "`Ryomotik`", inline = true },
                 { name = "👤 Игрок", value = "`" .. LocalPlayer.Name .. " (" .. LocalPlayer.DisplayName .. ")`", inline = true },
@@ -457,7 +511,7 @@ local function SendWebhook()
                 { name = "⚡ Сила / Power", value = "`" .. tostring(math.floor(stats.Power)) .. "`", inline = false },
                 { name = "🔄 Перерождения", value = "`" .. tostring(stats.Rebirth) .. "`", inline = true },
                 { name = "💰 Монеты", value = "`" .. tostring(stats.Coins) .. "`", inline = true },
-                { name = "🗺️ Макс. Этап", value = "`Stage " .. tostring(stats.Stage) .. "`", inline = true },
+                { name = "🗺️ Макс. Этап", value = "`Stage " .. tostring(stats.CareerMaxStage) .. "`", inline = true },
                 { name = "🛡️ Режим боя", value = "🟢 100% Legit Ground (Anti-Kick)", inline = true }
             },
             footer = { text = "Sword Loot Monarch • by Ryomotik" },
@@ -488,7 +542,7 @@ SpawnThread(function()
     end
 end)
 
--- Поток легитимного боя и этапов
+-- Поток прохождения этапов и наземного боя
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoStageRun or Context.Settings.AutoMobs then
@@ -498,16 +552,10 @@ SpawnThread(function()
                 task.wait(Context.Settings.SwingDelay)
             else
                 if Context.Settings.AutoStageRun then
-                    Farm.AdvanceStageForward()
+                    Farm.AdvanceStage()
                     Farm.CollectLoot()
-
-                    local now = os.clock()
-                    if Context.Settings.AutoStage and (now - Context.LastStageTeleport) > Context.Settings.StageInterval then
-                        Context.LastStageTeleport = now
-                        Farm.TeleportMaxStage()
-                    end
                 end
-                task.wait(0.25)
+                task.wait(0.2)
             end
         else
             task.wait(0.3)
@@ -515,7 +563,7 @@ SpawnThread(function()
     end
 end)
 
--- Поток сбора лута с фильтрацией выше мификов
+-- Поток сбора лута с точной фильтрацией
 SpawnThread(function()
     while Context.Running do
         if Context.Settings.AutoLoot then
@@ -568,7 +616,7 @@ local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Ryomotik • v2.4 Amethyst",
+    SubTitle = "by Ryomotik • v2.5 Amethyst",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -622,7 +670,7 @@ Tabs.Main:AddSlider("SwingSpeed", {
 
 -- Вкладка 2: Прохождение Этапов и Легитимный Бой
 local ToggleStageRun = Tabs.Stages:AddToggle("AutoStageRun", {
-    Title = "🚀 Автопрохождение этапов (Легитимный бег по земле)",
+    Title = "🚀 Автопрохождение этапов (Lobby -> Run -> Next)",
     Default = false
 })
 ToggleStageRun:OnChanged(function(val)
@@ -630,14 +678,14 @@ ToggleStageRun:OnChanged(function(val)
     if val then
         Fluent:Notify({
             Title = "Этапы",
-            Content = "Запущен легитимный наземный фарм без полётов и телепортов!",
+            Content = "Запущен цикл умного прохождения этапов и наземного боя!",
             Duration = 3.5
         })
     end
 end)
 
 local ToggleMobs = Tabs.Stages:AddToggle("AutoMobs", {
-    Title = "Авто-фарм мобов (Наземный бой на дистанции)",
+    Title = "Авто-фарм только мобов рядом (без перехода на этапы)",
     Default = false
 })
 ToggleMobs:OnChanged(function(val) Context.Settings.AutoMobs = val end)
@@ -667,18 +715,18 @@ ToggleHeal:OnChanged(function(val) Context.Settings.SmartHeal = val end)
 local DropdownLoot = Tabs.Loot:AddDropdown("LootFilterDropdown", {
     Title = "Минимальная редкость сбора дропа",
     Values = {
-        "Выше мификов (Divine / Secret / Celestial+)",
-        "Мифик и выше (Mythic+)",
+        "Мифик и выше (Mythic, Celestial, Secret, Divine)",
+        "Строго выше мификов (Celestial, Secret, Divine, Zenith)",
         "Легендарный и выше (Legendary+)",
         "Собирать всё подряд (All Drops)"
     },
-    Default = "Выше мификов (Divine / Secret / Celestial+)"
+    Default = "Мифик и выше (Mythic, Celestial, Secret, Divine)"
 })
 DropdownLoot:OnChanged(function(val)
-    if val == "Выше мификов (Divine / Secret / Celestial+)" then
-        Context.Settings.MinLootTier = 7
-    elseif val == "Мифик и выше (Mythic+)" then
+    if val == "Мифик и выше (Mythic, Celestial, Secret, Divine)" then
         Context.Settings.MinLootTier = 6
+    elseif val == "Строго выше мификов (Celestial, Secret, Divine, Zenith)" then
+        Context.Settings.MinLootTier = 7
     elseif val == "Легендарный и выше (Legendary+)" then
         Context.Settings.MinLootTier = 5
     else
@@ -704,9 +752,6 @@ ToggleRebirth:OnChanged(function(val) Context.Settings.AutoRebirth = val end)
 
 local ToggleEquip = Tabs.Progress:AddToggle("AutoEquip", { Title = "Авто-экипировка лучшего меча (InvEquipBest)", Default = false })
 ToggleEquip:OnChanged(function(val) Context.Settings.AutoEquipBest = val end)
-
-local ToggleStage = Tabs.Progress:AddToggle("AutoStage", { Title = "Авто-переход на максимальный этап", Default = true })
-ToggleStage:OnChanged(function(val) Context.Settings.AutoStage = val end)
 
 Tabs.Progress:AddButton({
     Title = "⚔️ Экипировать лучший меч сейчас",
@@ -791,6 +836,6 @@ end
 Window:SelectTab(2)
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "v2.4 Amethyst загружен! Автор: Ryomotik. Меню: LeftControl.",
+    Content = "v2.5 загружен! Автор: Ryomotik. Меню: LeftControl.",
     Duration = 4
 })
