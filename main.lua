@@ -371,46 +371,57 @@ end
 -- Подобрать конкретный дроп (отправить серверу запрос на подбор)
 local LastLootPickupTime = 0
 
+-- Функция синхронизации нативного серверного фильтра игры
+local function SyncNativeLootFilter(tier)
+    pcall(function()
+        if Net and Msg and Msg.SetLootFilter then
+            Net.InvokeServer(Msg.SetLootFilter, tier)
+        end
+    end)
+end
+
+-- Подобрать конкретный дроп (через ProximityPrompt + прямой Net.FireServer)
 local function FirePickup(obj)
-    -- Защита от rate-limit (max 15/sec)
+    if not obj or not obj.Parent then return false end
+
     local now = os.clock()
-    if (now - LastLootPickupTime) < 0.09 then return false end
+    if (now - LastLootPickupTime) < 0.08 then return false end
     LastLootPickupTime = now
 
+    -- 1. Сетевой вызов Net.FireServer(Msg.DropPickup, uid) если UID извлечён
     local uid = ExtractDropUID(obj)
-
-    -- Прямой сетевой вызов
     if uid then
         pcall(function()
             Net.FireServer(Msg.DropPickup, uid)
         end)
     end
 
-    -- ProximityPrompt fire
+    -- 2. Активация ProximityPrompt (родной игровой способ подбора)
     local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
     if prompt then
         pcall(function()
             prompt.HoldDuration = 0
-            prompt.MaxActivationDistance = 99999
             prompt.RequiresLineOfSight = false
         end)
 
+        -- В инжекторах: полное завершение промпта
         if fireproximityprompt then
-            pcall(fireproximityprompt, prompt, 1, true)
-            pcall(fireproximityprompt, prompt, 0, true)
-            pcall(fireproximityprompt, prompt)
+            pcall(function() fireproximityprompt(prompt, 1, true) end)
+            pcall(function() fireproximityprompt(prompt) end)
         end
 
         if firesignal then
-            pcall(firesignal, prompt.Triggered)
+            pcall(function() firesignal(prompt.Triggered) end)
         end
 
-        local getconn = getconnections
-        if getconn then
+        if getconnections then
             pcall(function()
-                for _, conn in ipairs(getconn(prompt.Triggered)) do
-                    if conn.Fire then conn:Fire() end
-                    if conn.Function then conn.Function() end
+                for _, conn in ipairs(getconnections(prompt.Triggered)) do
+                    if conn.Fire then
+                        pcall(function() conn:Fire() end)
+                    elseif conn.Function then
+                        pcall(conn.Function)
+                    end
                 end
             end)
         end
@@ -421,18 +432,18 @@ end
 
 -- Проверка: допустим ли дроп по фильтру
 local function IsDropAllowed(obj)
-    local rarity = Farm.GetDropRarity(obj)
+    if not obj or not obj.Parent then return false end
 
-    -- Сундуки/боссы всегда подбираем
+    -- Сундуки, боссы, ящики ВСЕГДА подбираем
     local objNameLower = string.lower(obj.Name)
-    if string.find(objNameLower, "chest") or string.find(objNameLower, "boss") or string.find(objNameLower, "box") then
+    if string.find(objNameLower, "chest") or string.find(objNameLower, "boss") or string.find(objNameLower, "box") or string.find(objNameLower, "crate") then
         return true
     end
 
     local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
     if prompt then
         local pText = string.lower(prompt.ObjectText .. " " .. prompt.ActionText)
-        if string.find(pText, "chest") or string.find(pText, "boss") or string.find(pText, "box") then
+        if string.find(pText, "chest") or string.find(pText, "boss") or string.find(pText, "box") or string.find(pText, "crate") then
             return true
         end
     end
@@ -441,34 +452,42 @@ local function IsDropAllowed(obj)
         return true
     end
 
-    local minTier = Context.Settings.MinLootTier or 6
+    local rarity = Farm.GetDropRarity(obj)
+    local minTier = Context.Settings.MinLootTier or 6 -- По умолчанию Tier 6 (Mythic и выше)
     return rarity >= minTier
 end
 
 -- ═══════════════════════════════════════════════════════════
--- ЧЕЛОВЕЧЕСКИЙ АВТОЛУТ: персонаж ХОДИТ к дропу ногами и подбирает
+-- ЧЕЛОВЕЧЕСКИЙ АВТОЛУТ: персонаж лично доходит ногами (<= 5.5 studs) и подбирает
 -- ═══════════════════════════════════════════════════════════
-local CurrentLootTarget = nil -- объект к которому идём
+local FailedLootAttempts = {}
+local CurrentLootingDrop = nil
+local CurrentLootStartTime = 0
 
 function Farm.FindBestLootTarget()
     local root = GetRootPart()
     if not root then return nil end
 
-    local maxRadius = Context.Settings.LootRadius or 60.0
+    local maxRadius = Context.Settings.LootRadius or 55.0
     local bestDrop = nil
     local bestDist = maxRadius
+    local now = os.clock()
 
     local function ScanFolder(folder)
         if not folder then return end
         for _, obj in ipairs(folder:GetChildren()) do
             if obj and obj.Parent then
-                local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
-                if part then
-                    local dist = (part.Position - root.Position).Magnitude
-                    if dist <= maxRadius and dist < bestDist then
-                        if IsDropAllowed(obj) then
-                            bestDist = dist
-                            bestDrop = obj
+                local failInfo = FailedLootAttempts[obj]
+                -- Пропускаем временно дроп если застряли на нём больше 5 секунд
+                if not (failInfo and (now - failInfo.firstTry) > 5.0 and (now - failInfo.lastFail) < 15.0) then
+                    local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
+                    if part then
+                        local dist = (Vector3.new(part.Position.X, 0, part.Position.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
+                        if dist <= maxRadius and dist < bestDist then
+                            if IsDropAllowed(obj) then
+                                bestDist = dist
+                                bestDrop = obj
+                            end
                         end
                     end
                 end
@@ -482,67 +501,70 @@ function Farm.FindBestLootTarget()
     return bestDrop
 end
 
--- Подойти к дропу ногами и подобрать
-function Farm.WalkToAndPickupDrop(dropObj)
-    if not dropObj or not dropObj.Parent then return false end
+-- Шаг автолута для главного цикла (возвращает true если занят подбором ценного дропа)
+function Farm.ProcessLootStep()
+    if not Context.Settings.AutoLoot then
+        CurrentLootingDrop = nil
+        return false
+    end
 
     local root = GetRootPart()
     local hum = GetHumanoid()
     if not root or not hum then return false end
 
+    -- Если предыдущая цель исчезла — сбрасываем
+    if CurrentLootingDrop and (not CurrentLootingDrop.Parent or not IsDropAllowed(CurrentLootingDrop)) then
+        CurrentLootingDrop = nil
+    end
+
+    -- Ищем ближайший дроп выше легендарки
+    if not CurrentLootingDrop then
+        CurrentLootingDrop = Farm.FindBestLootTarget()
+        CurrentLootStartTime = os.clock()
+    end
+
+    local dropObj = CurrentLootingDrop
+    if not dropObj or not dropObj.Parent then
+        CurrentLootingDrop = nil
+        return false
+    end
+
+    -- Защита от бесконечного застревания (максимум 5 секунд на попытку)
+    if (os.clock() - CurrentLootStartTime) > 5.0 then
+        FailedLootAttempts[dropObj] = { firstTry = CurrentLootStartTime, lastFail = os.clock() }
+        CurrentLootingDrop = nil
+        return false
+    end
+
     local part = dropObj:IsA("BasePart") and dropObj or dropObj:FindFirstChildWhichIsA("BasePart", true)
-    if not part then return false end
+    if not part then
+        CurrentLootingDrop = nil
+        return false
+    end
 
     local dropPos = part.Position
-    local dist = (Vector3.new(dropPos.X, 0, dropPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
+    local myPos = root.Position
+    local dist = (Vector3.new(dropPos.X, 0, dropPos.Z) - Vector3.new(myPos.X, 0, myPos.Z)).Magnitude
 
-    -- Если дроп достаточно близко (< 12 studs) — просто подбираем
-    if dist < 12 then
+    EnforceGroundState()
+
+    -- Если подошли вплотную к предмету (<= 5.5 studs) — подбираем!
+    if dist <= 5.5 then
         FirePickup(dropObj)
+        task.wait(0.08)
+        if not dropObj.Parent then
+            CurrentLootingDrop = nil
+        end
         return true
     end
 
-    -- Идём к дропу ногами по земле
+    -- Идём к предмету ногами по земле (через Raycast)
     local groundTarget = GetGroundPosition(dropPos.X, dropPos.Z)
     hum:MoveTo(groundTarget)
 
-    -- Ждём пока дойдём (максимум 4 секунды)
-    local startWalk = os.clock()
-    while Context.Running and Context.Settings.AutoLoot and dropObj and dropObj.Parent do
-        local currentRoot = GetRootPart()
-        if not currentRoot then break end
-
-        local currentDist = (Vector3.new(dropPos.X, 0, dropPos.Z) - Vector3.new(currentRoot.Position.X, 0, currentRoot.Position.Z)).Magnitude
-        if currentDist < 12 then
-            -- Дошли! Подбираем
-            FirePickup(dropObj)
-            return true
-        end
-
-        -- Таймаут
-        if (os.clock() - startWalk) > 4 then
-            break
-        end
-
-        -- Переобновляем MoveTo каждые 0.5 сек (если дроп двигался)
-        if dropObj and dropObj.Parent then
-            local newPart = dropObj:IsA("BasePart") and dropObj or dropObj:FindFirstChildWhichIsA("BasePart", true)
-            if newPart then
-                local newGround = GetGroundPosition(newPart.Position.X, newPart.Position.Z)
-                hum:MoveTo(newGround)
-            end
-        end
-
-        -- Ground enforcement во время ходьбы
-        EnforceGroundState()
-
-        task.wait(0.15)
-    end
-
-    return false
+    return true
 end
 
--- Поиск цели ТОЛЬКО в радиусе maxDistance (по умолчанию 45 studs)
 function Farm.GetTargetEnemy(maxDistance)
     maxDistance = maxDistance or Context.Settings.MaxTargetRange or 45.0
 
@@ -739,65 +761,36 @@ SpawnThread(function()
     end
 end)
 
--- ГЛАВНЫЙ ПОТОК: Идти вперёд -> Увидел моба рядом -> Убил -> Пошел дальше
+-- ГЛАВНЫЙ ПОТОК: Единый цикл действий (Автолут > Бой > Коридор) — никаких конфликтов MoveTo!
 SpawnThread(function()
     while Context.Running do
-        if Context.Settings.AutoStageRun or Context.Settings.AutoMobs then
-            local target = Farm.GetTargetEnemy(Context.Settings.MaxTargetRange or 45.0)
+        if Context.Settings.AutoStageRun or Context.Settings.AutoMobs or Context.Settings.AutoLoot then
+            -- 1. ПРИОРИТЕТ 1: Человеческий автолут (персонаж лично идёт ногами к дропу > Legendary)
+            local lootingActive = false
+            if Context.Settings.AutoLoot then
+                lootingActive = Farm.ProcessLootStep()
+            end
 
-            if target then
-                Farm.AttackTargetLegit(target)
-                task.wait(Context.Settings.SwingDelay)
+            if lootingActive then
+                -- Сейчас персонаж идёт или подбирает ценный дроп
+                task.wait(0.12)
             else
-                if Context.Settings.AutoStageRun then
-                    Farm.WalkForward()
+                -- 2. ПРИОРИТЕТ 2: Бой (если есть враг в радиусе)
+                local target = (Context.Settings.AutoStageRun or Context.Settings.AutoMobs) and Farm.GetTargetEnemy(Context.Settings.MaxTargetRange or 45.0)
+
+                if target then
+                    Farm.AttackTargetLegit(target)
+                    task.wait(Context.Settings.SwingDelay)
+                else
+                    -- 3. ПРИОРИТЕТ 3: Движение вперёд по коридору
+                    if Context.Settings.AutoStageRun then
+                        Farm.WalkForward()
+                    end
+                    task.wait(0.3)
                 end
-                task.wait(0.35)
             end
         else
             task.wait(0.3)
-        end
-    end
-end)
-
--- Поток автолута: человеческий подход и подбор
-SpawnThread(function()
-    while Context.Running do
-        if Context.Settings.AutoLoot then
-            -- Если не в бою и не в режиме бега — ищем дроп и идём к нему
-            local isInCombat = (Context.Settings.AutoStageRun or Context.Settings.AutoMobs) and Farm.GetTargetEnemy(Context.Settings.MaxTargetRange) ~= nil
-
-            if not isInCombat then
-                local dropObj = Farm.FindBestLootTarget()
-                if dropObj then
-                    Farm.WalkToAndPickupDrop(dropObj)
-                end
-            else
-                -- В бою: подбираем только близлежащие дропы (< 15 studs) без ходьбы
-                local root = GetRootPart()
-                if root then
-                    local function QuickPickNearby(folder)
-                        if not folder then return end
-                        for _, obj in ipairs(folder:GetChildren()) do
-                            if obj and obj.Parent and IsDropAllowed(obj) then
-                                local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
-                                if part then
-                                    local dist = (part.Position - root.Position).Magnitude
-                                    if dist < 15 then
-                                        FirePickup(obj)
-                                    end
-                                end
-                            end
-                        end
-                    end
-                    QuickPickNearby(Workspace:FindFirstChild("DropsClient"))
-                    QuickPickNearby(Workspace:FindFirstChild("Drops"))
-                end
-            end
-
-            task.wait(Context.Settings.LootInterval)
-        else
-            task.wait(1.5)
         end
     end
 end)
