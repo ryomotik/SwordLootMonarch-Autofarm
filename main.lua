@@ -586,14 +586,17 @@ function Farm.AttackTargetLegit(target)
 
     local desiredDist = Context.Settings.CombatDistance or 8.0
 
-    -- 2. Движение ногами к мобу (по ЗЕМЛЕ через Raycast!)
+    -- 2. Подход к мобу по центру
     if dist > desiredDist + 1.5 then
         hum:MoveTo(targetPos)
     elseif dist < desiredDist - 2.5 then
         local stepBack = myPos - flatDelta.Unit * 3.0
         hum:MoveTo(stepBack)
+    else
+        -- На дистанции боя стоим и бьём в упор, поворачиваясь к мобу
+        local lookTarget = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
+        root.CFrame = CFrame.lookAt(myPos, lookTarget)
     end
-    -- На дистанции удара: НЕ вызываем Move/MoveTo — Humanoid сам остановится
 
     -- 3. Атака
     local now = os.clock()
@@ -627,7 +630,7 @@ function Farm.AttackTargetLegit(target)
     end
 end
 
--- ЕСТЕСТВЕННЫЙ БЕГ ВПЕРЁД ПО ДОРОЖКЕ
+-- ЕСТЕСТВЕННЫЙ БЕГ ПО СЕРЕДИНЕ КОРИДОРА ЭТАПОВ
 function Farm.WalkForward()
     local root = GetRootPart()
     local hum = GetHumanoid()
@@ -635,21 +638,24 @@ function Farm.WalkForward()
 
     EnforceGroundState()
 
-    -- 1. Если есть враги впереди — идём прямо к ближайшему врагу!
+    -- 1. Если есть враг впереди — идём прямо к ближайшему врагу!
     local enemy = Farm.GetTargetEnemy(Context.Settings.MaxTargetRange or 250.0)
     if enemy and enemy.Root then
         hum:MoveTo(enemy.Root.Position)
         return
     end
 
-    -- 2. Если врагов нет — идём вперёд по направлению коридора
+    -- 2. Врагов нет: идём строго ПО СЕРЕДИНЕ коридора этапа (центральная ось X = -1.2, направление -Z)
     local currentPos = root.Position
-    local lookDir = root.CFrame.LookVector * Vector3.new(1, 0, 1)
-    if lookDir.Magnitude > 0.1 then
-        hum:MoveTo(currentPos + lookDir.Unit * 30)
-    else
-        hum:MoveTo(Vector3.new(currentPos.X, currentPos.Y, currentPos.Z - 30))
-    end
+    local centerX = -1.2
+    local nextZ = currentPos.Z - 30
+
+    -- Плавное удержание по центру: мягко возвращаем персонажа на ось X = -1.2
+    local diffX = centerX - currentPos.X
+    local stepX = currentPos.X + math.clamp(diffX, -6.0, 6.0)
+
+    local targetPos = Vector3.new(stepX, currentPos.Y, nextZ)
+    hum:MoveTo(targetPos)
 end
 
 -- 6. СЛУЖЕБНЫЕ ХУКИ
