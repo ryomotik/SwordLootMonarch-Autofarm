@@ -728,67 +728,57 @@ end)
 -- ═══════════════════════════════════════════════════════════
 local LastStageSpawnTime = 0
 
+local LastDeathActionTime = 0
 function Farm.HandleDeathScreen()
     local lp = LocalPlayer
     local pg = lp:FindFirstChildOfClass("PlayerGui") or lp:FindFirstChild("PlayerGui")
     if not pg then return false end
 
-    local handled = false
+    local hum = GetHumanoid()
+    local isHumDead = (hum and hum.Health <= 0)
 
     -- 1. DeathGui (Окно "Вы умерли" с серой кнопкой "Вернуться в город")
     local deathGui = pg:FindFirstChild("DeathGui")
-    if deathGui and deathGui.Enabled then
-        local root = deathGui:FindFirstChild("Root")
-        local panel = root and root:FindFirstChild("Panel")
+    local deathRoot = deathGui and deathGui:FindFirstChild("Root")
+
+    -- ВАЖНО: deathGui.Enabled в Roblox ВСЕГДА true!
+    -- Реальная смерть наступает ТОЛЬКО когда deathRoot.Visible == true или hum.Health <= 0!
+    if (deathRoot and deathRoot.Visible) or isHumDead then
+        local panel = deathRoot and deathRoot:FindFirstChild("Panel")
         local ret = panel and panel:FindFirstChild("Return")
         local btn = ret and ret:FindFirstChild("Btn")
 
-        if btn then
-            if firesignal then
-                pcall(function() firesignal(btn.Activated) end)
-                pcall(function() firesignal(btn.MouseButton1Click) end)
-            end
-            if getconnections then
-                pcall(function()
-                    for _, c in ipairs(getconnections(btn.Activated)) do
-                        if c.Fire then pcall(function() c:Fire() end)
-                        elseif c.Function then pcall(c.Function) end
-                    end
-                    for _, c in ipairs(getconnections(btn.MouseButton1Click)) do
-                        if c.Fire then pcall(function() c:Fire() end)
-                        elseif c.Function then pcall(c.Function) end
-                    end
-                end)
-            end
-            handled = true
-        end
+        local now = os.clock()
+        if (now - LastDeathActionTime) >= 1.0 then
+            LastDeathActionTime = now
 
-        pcall(function()
-            Net.FireServer(Msg.StageReturnTown)
-        end)
-    end
-
-    -- 2. Окно "Dead" (резервный экран)
-    local deadGui = pg:FindFirstChild("Dead")
-    if deadGui and deadGui.Enabled then
-        for _, desc in ipairs(deadGui:GetDescendants()) do
-            if desc:IsA("GuiButton") and (desc.Name == "Button" or desc.Name:find("Give")) then
-                if firesignal then pcall(function() firesignal(desc.MouseButton1Click) end) end
+            if btn and btn:IsA("GuiButton") then
+                if firesignal then
+                    pcall(function() firesignal(btn.Activated) end)
+                    pcall(function() firesignal(btn.MouseButton1Click) end)
+                end
                 if getconnections then
                     pcall(function()
-                        for _, c in ipairs(getconnections(desc.MouseButton1Click)) do
+                        for _, c in ipairs(getconnections(btn.Activated)) do
+                            if c.Fire then pcall(function() c:Fire() end)
+                            elseif c.Function then pcall(c.Function) end
+                        end
+                        for _, c in ipairs(getconnections(btn.MouseButton1Click)) do
                             if c.Fire then pcall(function() c:Fire() end)
                             elseif c.Function then pcall(c.Function) end
                         end
                     end)
                 end
-                handled = true
             end
+
+            pcall(function()
+                Net.FireServer(Msg.StageReturnTown)
+            end)
         end
-        pcall(function() Net.FireServer(Msg.StageReturnTown) end)
+        return true
     end
 
-    return handled
+    return false
 end
 
 function Farm.CheckStageEntry()
