@@ -86,7 +86,7 @@ local Context = {
     StartTime = os.clock(),
     Settings = {
         AutoSwing = false,
-        SwingDelay = 0.12,
+        SwingDelay = 0.24,
         AutoStageRun = false,
         AutoMobs = false,
         CombatDistance = 8.0,
@@ -201,43 +201,9 @@ local function EnforceGroundState()
     local root = GetRootPart()
     if not hum or not root then return end
 
-    -- Сброс состояний, вызывающих парение
     if hum.PlatformStand then hum.PlatformStand = false end
     if hum.Sit then hum.Sit = false end
     hum.AutoRotate = true
-
-    -- Удаляем BodyMovers которые могут подбрасывать персонажа
-    local char = GetCharacter()
-    if char then
-        for _, obj in ipairs(char:GetDescendants()) do
-            if obj:IsA("BodyVelocity") or obj:IsA("BodyPosition") or obj:IsA("BodyGyro") or obj:IsA("LinearVelocity") or obj:IsA("VectorForce") then
-                -- Не трогаем стандартные Roblox объекты
-                if obj.Name ~= "RootJoint" and not string.find(obj.Name, "Animate") then
-                    pcall(function() obj:Destroy() end)
-                end
-            end
-        end
-    end
-
-    -- Если Humanoid в состоянии Freefall, но есть пол под ногами -> форсируем Running
-    local state = hum:GetState()
-    if state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.FallingDown then
-        local groundY = GetGroundY(root.Position)
-        local deltaY = root.Position.Y - groundY
-        if deltaY < 2 and deltaY > -2 then
-            -- Мы рядом с землёй но Humanoid думает что летим
-            hum:ChangeState(Enum.HumanoidStateType.Running)
-        end
-    end
-
-    -- Если вертикальная скорость слишком высокая без причины — обнуляем
-    if root.AssemblyLinearVelocity.Y > 15 and state ~= Enum.HumanoidStateType.Jumping then
-        root.AssemblyLinearVelocity = Vector3.new(
-            root.AssemblyLinearVelocity.X,
-            0,
-            root.AssemblyLinearVelocity.Z
-        )
-    end
 end
 
 -- 5. МОДУЛИ ФАРМА
@@ -371,63 +337,49 @@ end
 -- Подобрать конкретный дроп (отправить серверу запрос на подбор)
 local LastLootPickupTime = 0
 
--- Функция синхронизации нативного серверного фильтра игры
-local function SyncNativeLootFilter(tier)
-    pcall(function()
-        if Net and Msg and Msg.SetLootFilter then
-            Net.InvokeServer(Msg.SetLootFilter, tier)
-        end
-    end)
-end
-
--- Подобрать конкретный дроп (через ProximityPrompt + прямой Net.FireServer)
+-- Безопасный подбор дропа (ровно 1 запрос с жестким интервалом >= 0.35s)
 local function FirePickup(obj)
     if not obj or not obj.Parent then return false end
 
     local now = os.clock()
-    if (now - LastLootPickupTime) < 0.08 then return false end
+    -- Лимит: максимум ~2.8 подборов/сек (серверный лимит кика = 15/сек)
+    if (now - LastLootPickupTime) < 0.35 then return false end
     LastLootPickupTime = now
 
-    -- 1. Сетевой вызов Net.FireServer(Msg.DropPickup, uid) если UID извлечён
+    local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
+
+    -- Способ 1: Родной ProximityPrompt через fireproximityprompt (ровно 1 вызов)
+    if prompt and fireproximityprompt then
+        local ok = false
+        pcall(function()
+            prompt.HoldDuration = 0
+            prompt.RequiresLineOfSight = false
+            fireproximityprompt(prompt, 1, true)
+            ok = true
+        end)
+        if ok then return true end
+    end
+
+    -- Способ 2: firesignal на событие Triggered
+    if prompt and firesignal then
+        local ok = false
+        pcall(function()
+            firesignal(prompt.Triggered)
+            ok = true
+        end)
+        if ok then return true end
+    end
+
+    -- Способ 3: Прямой сетевой вызов Net.FireServer ровно 1 раз
     local uid = ExtractDropUID(obj)
     if uid then
         pcall(function()
             Net.FireServer(Msg.DropPickup, uid)
         end)
+        return true
     end
 
-    -- 2. Активация ProximityPrompt (родной игровой способ подбора)
-    local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
-    if prompt then
-        pcall(function()
-            prompt.HoldDuration = 0
-            prompt.RequiresLineOfSight = false
-        end)
-
-        -- В инжекторах: полное завершение промпта
-        if fireproximityprompt then
-            pcall(function() fireproximityprompt(prompt, 1, true) end)
-            pcall(function() fireproximityprompt(prompt) end)
-        end
-
-        if firesignal then
-            pcall(function() firesignal(prompt.Triggered) end)
-        end
-
-        if getconnections then
-            pcall(function()
-                for _, conn in ipairs(getconnections(prompt.Triggered)) do
-                    if conn.Fire then
-                        pcall(function() conn:Fire() end)
-                    elseif conn.Function then
-                        pcall(conn.Function)
-                    end
-                end
-            end)
-        end
-    end
-
-    return true
+    return false
 end
 
 -- Проверка: допустим ли дроп по фильтру
@@ -637,7 +589,7 @@ function Farm.AttackTargetLegit(target)
 
     -- 3. Атака
     local now = os.clock()
-    if (now - LastAttackTime) >= (Context.Settings.SwingDelay or 0.14) then
+    if (now - LastAttackTime) >= (Context.Settings.SwingDelay or 0.24) then
         LastAttackTime = now
         pcall(function()
             SkillInput.Press(Enums.SkillSlot.NormalAttack)
@@ -645,17 +597,17 @@ function Farm.AttackTargetLegit(target)
     end
 
     -- Навыки по таймерам
-    if (now - LastSkill1Time) >= 3.5 then
+    if (now - LastSkill1Time) >= 4.5 then
         LastSkill1Time = now
         pcall(function() SkillInput.Press(Enums.SkillSlot.Skill1) end)
     end
 
-    if (now - LastSkill2Time) >= 4.8 then
+    if (now - LastSkill2Time) >= 6.5 then
         LastSkill2Time = now
         pcall(function() SkillInput.Press(Enums.SkillSlot.Skill2) end)
     end
 
-    if (now - LastSkill3Time) >= 6.5 then
+    if (now - LastSkill3Time) >= 8.5 then
         LastSkill3Time = now
         pcall(function() SkillInput.Press(Enums.SkillSlot.Skill3) end)
     end
