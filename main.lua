@@ -4,7 +4,7 @@
     ⚡ Engine: Fluent UI (Amethyst Purple Edition)
     👑 Author: Ryomotik
     🛠️ Co-Developer: Antigravity Automation
-    🔬 Version: v3.0 Ground Walker — Raycast Grounded Movement + Human Loot
+    🔬 Version: v3.1 Ground Walker — Raycast Grounded Movement + Human Loot + Fixed Capability
     ═══════════════════════════════════════════════════════════════
 ]]
 
@@ -802,12 +802,41 @@ SpawnThread(function()
     end
 end)
 
--- 9. FLUENT UI (Amethyst Purple Edition)
-local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+-- 9. FLUENT UI (Amethyst Purple Edition — With Capability & CoreGui Protection)
+local function LoadFluent()
+    local fluentSource = nil
+    -- 1. Сначала пробуем загрузить пропатченную версию из нашего репозитория
+    pcall(function()
+        fluentSource = game:HttpGet("https://raw.githubusercontent.com/ryomotik/SwordLootMonarch-Autofarm/main/fluent.lua", true)
+    end)
+
+    -- 2. Если не вышло — качаем оригинал и патчим CoreGui на лету
+    if not fluentSource or #fluentSource < 1000 then
+        pcall(function()
+            fluentSource = game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua", true)
+            if fluentSource then
+                fluentSource = fluentSource:gsub("game:GetService%s*['\"]CoreGui['\"]", "((gethui and gethui()) or game:GetService('Players').LocalPlayer:WaitForChild('PlayerGui'))")
+            end
+        end)
+    end
+
+    if fluentSource and #fluentSource > 1000 then
+        local fn, loadErr = loadstring(fluentSource)
+        if fn then
+            local success, lib = pcall(fn)
+            if success and lib then
+                return lib
+            end
+        end
+    end
+    error("[Fluent Error]: Не удалось загрузить GUI библиотеку.")
+end
+
+local Fluent = LoadFluent()
 
 local Window = Fluent:CreateWindow({
     Title = "Sword Loot Monarch",
-    SubTitle = "by Ryomotik • v3.0 Ground Walker",
+    SubTitle = "by Ryomotik • v3.1 Ground Walker",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -815,90 +844,6 @@ local Window = Fluent:CreateWindow({
     MinimizeKey = Enum.KeyCode.LeftControl
 })
 Fluent:SetTheme("Amethyst")
-
--- Драг окна — ищем GUI через gethui и делаем основной фрейм перетаскиваемым
-task.defer(function()
-    pcall(function()
-        task.wait(0.5) -- Ждём полной инициализации Fluent
-
-        -- Находим GUI Fluent окна
-        local gui = nil
-        if gethui then
-            for _, v in ipairs(gethui():GetChildren()) do
-                if v:IsA("ScreenGui") and v:FindFirstChild("Main", true) then
-                    gui = v
-                    break
-                end
-            end
-        end
-        if not gui then
-            gui = game:GetService("CoreGui"):FindFirstChildOfClass("ScreenGui")
-        end
-        if not gui then return end
-
-        -- Находим основной фрейм окна
-        local mainFrame = gui:FindFirstChild("Main", true)
-        if not mainFrame then
-            mainFrame = gui:FindFirstChildWhichIsA("Frame", true)
-        end
-        if not mainFrame or not mainFrame:IsA("GuiObject") then return end
-
-        -- Ищем TitleBar для привязки перетаскивания
-        local dragHandle = mainFrame:FindFirstChild("TitleBar", true)
-        if not dragHandle then
-            -- Ищем верхний бар
-            for _, child in ipairs(mainFrame:GetDescendants()) do
-                if child:IsA("Frame") and child.AbsoluteSize.Y < 50 and child.AbsoluteSize.Y > 20 then
-                    dragHandle = child
-                    break
-                end
-            end
-        end
-        if not dragHandle then
-            dragHandle = mainFrame
-        end
-
-        dragHandle.Active = true
-
-        local dragging = false
-        local dragStartPos = nil
-        local frameStartPos = nil
-
-        TrackConnection(dragHandle.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                dragging = true
-                dragStartPos = input.Position
-                frameStartPos = mainFrame.Position
-
-                local endConn
-                endConn = input.Changed:Connect(function()
-                    if input.UserInputState == Enum.UserInputState.End then
-                        dragging = false
-                        if endConn then endConn:Disconnect() end
-                    end
-                end)
-            end
-        end))
-
-        TrackConnection(UserInputService.InputChanged:Connect(function(input)
-            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-                local delta = input.Position - dragStartPos
-                mainFrame.Position = UDim2.new(
-                    frameStartPos.X.Scale,
-                    frameStartPos.X.Offset + delta.X,
-                    frameStartPos.Y.Scale,
-                    frameStartPos.Y.Offset + delta.Y
-                )
-            end
-        end))
-
-        TrackConnection(UserInputService.InputEnded:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                dragging = false
-            end
-        end))
-    end)
-end)
 
 local Tabs = {
     Main = Window:AddTab({ Title = "Фарм", Icon = "swords" }),
@@ -1138,6 +1083,6 @@ end
 Window:SelectTab(2)
 Fluent:Notify({
     Title = "Sword Loot Monarch",
-    Content = "v3.0 Ground Walker загружен! Автор: Ryomotik. Меню: LeftControl.",
+    Content = "v3.1 Ground Walker загружен! Автор: Ryomotik. Меню: LeftControl.",
     Duration = 4
 })
