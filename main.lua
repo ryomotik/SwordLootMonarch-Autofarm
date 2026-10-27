@@ -1,1174 +1,1043 @@
 --[[
     ═══════════════════════════════════════════════════════════════
     🎮 Game: [+1 Sword Loot Monarch] (PlaceId: 93239606899307)
-    ⚡ Engine: Fluent UI (Amethyst Purple Edition)
+    ⚡ UI Style: Fluent Interface Suite (Amethyst Edition)
     👑 Author: Ryomotik
-    🛠️ Co-Developer: Antigravity Automation
-    🔬 Version: v3.1 Ground Walker — Raycast Grounded Movement + Human Loot + Fixed Capability
+    ✨ Features:
+       • Дефолтные плавные анимации (TweenService Quart / Spring-like)
+       • Гладкие скруглённые края (Smooth Rounded Corners & Acrylic Glass)
+       • Классический сайдбар с вкладками и скользящим индикатором
+       • Непрерывный авто-кликер силы (20 кликов/сек)
+       • Авто-перерождение (Auto Rebirth)
+       • Умный фарм этапов (Stages 1..38, No-Clip барьеров)
+       • Авто-каст способностей и моментальный сбор лута
+       • Горячая клавиша: Left Control
     ═══════════════════════════════════════════════════════════════
 ]]
 
--- 0. ПРЕДОТВРАЩЕНИЕ ДУБЛИРОВАНИЯ И ОЧИСТКА СТАРЫХ МОТОРОВ
-if getgenv().__FluentActiveMotors then
-    for _, m in pairs(getgenv().__FluentActiveMotors) do
-        pcall(function() m:stop() end)
-    end
-    table.clear(getgenv().__FluentActiveMotors)
-end
-
-if getgenv().SwordMonarchInstance then
-    pcall(function()
-        getgenv().SwordMonarchInstance:Unload()
-    end)
-    task.wait(0.2)
-end
-
-if getgenv().Fluent then
-    pcall(function() getgenv().Fluent:Destroy() end)
-    getgenv().Fluent = nil
-end
-
-local function CleanupOldGuis()
-    local lp = game:GetService('Players').LocalPlayer
-    if lp then
-        local pg = lp:FindFirstChild('PlayerGui')
-        if pg then
-            for _, child in ipairs(pg:GetChildren()) do
-                if child:IsA('ScreenGui') and (child.Name == 'SwordMonarchGui' or child.Name:find('ScreenGui') and child:FindFirstChild('AcrylicPaint', true)) then
-                    pcall(function() child:Destroy() end)
-                end
-            end
-        end
-    end
-    if gethui then
-        pcall(function()
-            for _, child in ipairs(gethui():GetChildren()) do
-                if child:IsA('ScreenGui') and (child.Name == 'SwordMonarchGui' or child.Name:find('ScreenGui') and child:FindFirstChild('AcrylicPaint', true)) then
-                    pcall(function() child:Destroy() end)
-                end
-            end
-        end)
-    end
-end
-CleanupOldGuis()
-
--- 1. СЕРВИСЫ
 local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local VirtualUser = game:GetService("VirtualUser")
 local TweenService = game:GetService("TweenService")
-local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
-
--- 2. ПОДКЛЮЧЕНИЕ К ВНУТРЕННИМ МОДУЛЯМ ИГРЫ
-local Shared = ReplicatedStorage:WaitForChild("Shared", 15)
-local Net = require(Shared:WaitForChild("Net"):WaitForChild("Net"))
-local Protocol = require(Shared:WaitForChild("Net"):WaitForChild("Protocol"))
-local Enums = require(Shared:WaitForChild("Enums"))
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Net = require(Shared.Net.Net)
+local Protocol = require(Shared.Net.Protocol)
 local Msg = Protocol.Msg
 
-local ClientScripts = LocalPlayer:WaitForChild("PlayerScripts", 15):WaitForChild("Client", 15)
-local ClientData = require(ClientScripts:WaitForChild("ClientData", 15))
-local SkillInput = require(ClientScripts:WaitForChild("SkillInput", 15))
-
-local HttpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-
--- 3. СОСТОЯНИЕ СКРИПТА
-local Context = {
-    Running = true,
-    Connections = {},
-    Threads = {},
-    LastDashTime = 0,
-    StartTime = os.clock(),
-    Settings = {
-        AutoSwing = false,
-        SwingDelay = 0.24,
-        AutoStageRun = false,
-        AutoMobs = false,
-        CombatDistance = 8.0,
-        MaxTargetRange = 250.0,
-        AutoDash = false,
-        SmartHeal = true,
-        AutoRebirth = false,
-        RebirthDelay = 2.0,
-        AutoEquipBest = false,
-        EquipInterval = 8.0,
-        AutoLoot = false,
-        LootAll = false,
-        MinLootTier = 6,
-        LootRadius = 60.0,
-        LootInterval = 0.3,
-        AntiAFK = true,
-        FPSBoost = false,
-        WebhookEnabled = false,
-        WebhookURL = "",
-        WebhookInterval = 300
-    }
+-- Configuration
+local Config = {
+    AutoClicker = true,       -- Непрерывный кликер силы
+    ClickSpeed = 20,          -- Частота кликов в секунду (макс ~25)
+    AutoRebirth = true,       -- Авто-перерождение
+    AutoFarmStages = false,   -- Авто-прохождение этапов
+    StageWaitTime = 1.0,      -- Задержка на зачистку мобов
+    AutoCast = true,          -- Авто-каст навыков и атака мечом
+    AutoPickup = true,        -- Авто-подбор лута
+    GuiVisible = true,
 }
-getgenv().SwordMonarchInstance = Context
 
--- 4. СЛУЖЕБНЫЕ ФУНКЦИИ
-local function TrackConnection(conn)
-    table.insert(Context.Connections, conn)
-    return conn
-end
-
-local function SpawnThread(fn)
-    local co = task.spawn(function()
-        while Context.Running do
-            local success, err = pcall(fn)
-            if not success and Context.Running then
-                task.wait(1)
-            end
-        end
-    end)
-    table.insert(Context.Threads, co)
-    return co
-end
-
-local function GetCharacter()
-    return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-end
-
-local function GetRootPart()
-    local char = GetCharacter()
-    return char:WaitForChild("HumanoidRootPart", 5)
-end
-
-local function GetHumanoid()
-    local char = GetCharacter()
-    return char:WaitForChild("Humanoid", 5)
-end
-
-local function GetStats()
-    local data = ClientData and ClientData.Get and ClientData.Get()
-    if data then
-        return {
-            Power = data.Power or 0,
-            Coins = data.Coins or 0,
-            Rebirth = data.Rebirth or 0,
-            Level = data.Level or 1,
-            CareerMaxStage = data.CareerMaxStage or 1
-        }
+-- Cleanup old GUI instances
+local GUI_NAME = "Ryomotik_Fluent_Hub"
+local parentGui = (gethui and gethui()) or game:GetService("CoreGui") or LocalPlayer:WaitForChild("PlayerGui")
+for _, name in ipairs({"Ryomotik_Fluent_Hub", "Ryomotik_Monarch_Hub", "Ryomotik_VisionGlass_Hub", "Ryomotik_LiquidGlass_Hub", "SwordMonarchGui"}) do
+    local old = parentGui:FindFirstChild(name)
+    if old then pcall(function() old:Destroy() end) end
+    if LocalPlayer:FindFirstChild("PlayerGui") then
+        local pOld = LocalPlayer.PlayerGui:FindFirstChild(name)
+        if pOld then pcall(function() pOld:Destroy() end) end
     end
-    return { Power = 0, Coins = 0, Rebirth = 0, Level = 1, CareerMaxStage = 1 }
 end
 
--- ═══════════════════════════════════════════════════════════
--- RAYCAST GROUND CLAMP — определение реальной поверхности земли
--- ═══════════════════════════════════════════════════════════
-local RaycastParams_Ground = RaycastParams.new()
-RaycastParams_Ground.FilterType = Enum.RaycastFilterType.Exclude
-
-local function GetGroundY(position)
-    -- Обновляем фильтр каждый раз (персонаж может респавниться)
-    local char = GetCharacter()
-    if char then
-        RaycastParams_Ground.FilterDescendantsInstances = {char, Workspace:FindFirstChild("DropsClient"), Workspace:FindFirstChild("EnemiesClient")}
-    end
-
-    -- Кастуем луч вниз от позиции + 5 studs вверх
-    local origin = Vector3.new(position.X, position.Y + 5, position.Z)
-    local result = Workspace:Raycast(origin, Vector3.new(0, -50, 0), RaycastParams_Ground)
-    if result then
-        return result.Position.Y + 3 -- +3 studs = примерная высота HumanoidRootPart над землёй
-    end
-
-    -- Фоллбэк: кастуем с высоты 200
-    local resultHigh = Workspace:Raycast(Vector3.new(position.X, 200, position.Z), Vector3.new(0, -400, 0), RaycastParams_Ground)
-    if resultHigh then
-        return resultHigh.Position.Y + 3
-    end
-
-    return position.Y -- Если ничего не нашли, оставляем как есть
-end
-
-local function GetGroundPosition(x, z)
-    local y = GetGroundY(Vector3.new(x, 100, z))
-    return Vector3.new(x, y, z)
-end
-
--- ═══════════════════════════════════════════════════════════
--- GROUND ENFORCEMENT — принудительное удержание на земле
--- Фоновый цикл: если персонаж в воздухе без причины -> возвращаем на землю
--- ═══════════════════════════════════════════════════════════
-local function EnforceGroundState()
-    local hum = GetHumanoid()
-    local root = GetRootPart()
-    if not hum or not root then return end
-
-    if hum.PlatformStand then hum.PlatformStand = false end
-    if hum.Sit then hum.Sit = false end
-    hum.AutoRotate = true
-end
-
--- 5. МОДУЛИ ФАРМА
-local Farm = {}
-
-function Farm.ClickTrain()
+-- =============================================================================
+-- BARRIER BYPASS (Снятие коллизий всех барьеров карты)
+-- =============================================================================
+local function disableAllBarriers()
     pcall(function()
-        Net.FireServer(Msg.TrainManualClick)
-    end)
-end
-
-function Farm.EquipBest()
-    pcall(function()
-        Net.InvokeServer(Msg.InvEquipBest)
-    end)
-end
-
-function Farm.Rebirth()
-    pcall(function()
-        Net.InvokeServer(Msg.PlayerRebirth)
-    end)
-end
-
-function Farm.ApplyNativeLootFilter(tier)
-    pcall(function()
-        Net.InvokeServer(Msg.SetLootFilter, tier)
-    end)
-end
-
--- Точнейшее определение редкости (по формуле игры из DropRenderer)
-function Farm.GetDropRarity(dropObj)
-    if not dropObj then return 1 end
-
-    -- 1. Поиск PointLight (в объекте или его потомках)
-    local light = dropObj:IsA("PointLight") and dropObj or dropObj:FindFirstChildOfClass("PointLight")
-    if not light then
-        light = dropObj:FindFirstChildWhichIsA("PointLight", true)
-    end
-
-    if light then
-        -- Точнейшая формула игры: Range = Rarity + 6
-        if light.Range and light.Range >= 6.5 and light.Range <= 16.5 then
-            local r = math.round(light.Range - 6)
-            if r >= 1 and r <= 10 then
-                return r
-            end
-        end
-
-        -- Формула яркости игры: Brightness = Rarity * 0.15 + 0.8
-        if light.Brightness and light.Brightness >= 0.85 and light.Brightness <= 2.5 then
-            local r = math.round((light.Brightness - 0.8) / 0.15)
-            if r >= 1 and r <= 10 then
-                return r
-            end
-        end
-
-        -- Сравнение с таблицей цветов Enums.RarityColor
-        if light.Color and Enums and Enums.RarityColor then
-            local c = light.Color
-            local bestTier = 1
-            local minDiff = 999
-            for tier = 1, 10 do
-                local col = Enums.RarityColor[tier]
-                if col then
-                    local diff = math.abs(c.R - col.R) + math.abs(c.G - col.G) + math.abs(c.B - col.B)
-                    if diff < minDiff then
-                        minDiff = diff
-                        bestTier = tier
-                    end
-                end
-            end
-            if minDiff < 0.45 then
-                return bestTier
-            end
-        end
-    end
-
-    -- 2. Проверка текста в ProximityPrompt или названии
-    local prompt = dropObj:FindFirstChildOfClass("ProximityPrompt", true)
-    if prompt then
-        local text = string.lower(prompt.ObjectText .. " " .. prompt.ActionText)
-        if string.find(text, "zenith") then return 10
-        elseif string.find(text, "divine") then return 9
-        elseif string.find(text, "secret") then return 8
-        elseif string.find(text, "celestial") then return 7
-        elseif string.find(text, "mythic") then return 6
-        elseif string.find(text, "legendary") then return 5
-        elseif string.find(text, "epic") then return 4
-        elseif string.find(text, "rare") then return 3
-        elseif string.find(text, "uncommon") then return 2
-        elseif string.find(text, "common") then return 1
-        end
-    end
-
-    return 1
-end
-
--- Извлечение UID из дропа
-local function ExtractDropUID(obj)
-    local uid = nil
-    local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
-
-    if prompt then
-        local getconn = getconnections
-        local getupv = (debug and debug.getupvalues) or getupvalues
-        if getconn and getupv then
-            pcall(function()
-                for _, conn in ipairs(getconn(prompt.Triggered)) do
-                    if conn.Function then
-                        for _, val in pairs(getupv(conn.Function)) do
-                            if type(val) == "number" and val > 0 and val < 1000000000 then
-                                uid = val
-                                break
-                            end
-                        end
-                    end
-                    if uid then break end
-                end
-            end)
-        end
-    end
-
-    if not uid then
-        local rawUid = obj:GetAttribute("UID") or obj:GetAttribute("uid") or obj:GetAttribute("Id")
-        uid = tonumber(rawUid) or tonumber(string.match(obj.Name, "%d+"))
-    end
-
-    return uid
-end
-
--- Подобрать конкретный дроп (отправить серверу запрос на подбор)
-local LastLootPickupTime = 0
-
--- Безопасный подбор дропа (ровно 1 запрос с жестким интервалом >= 0.35s)
-local function FirePickup(obj)
-    if not obj or not obj.Parent then return false end
-
-    local now = os.clock()
-    -- Лимит: максимум ~2.8 подборов/сек (серверный лимит кика = 15/сек)
-    if (now - LastLootPickupTime) < 0.35 then return false end
-    LastLootPickupTime = now
-
-    local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
-
-    -- Способ 1: Родной ProximityPrompt через fireproximityprompt (ровно 1 вызов)
-    if prompt and fireproximityprompt then
-        local ok = false
-        pcall(function()
-            prompt.HoldDuration = 0
-            prompt.RequiresLineOfSight = false
-            fireproximityprompt(prompt, 1, true)
-            ok = true
-        end)
-        if ok then return true end
-    end
-
-    -- Способ 2: firesignal на событие Triggered
-    if prompt and firesignal then
-        local ok = false
-        pcall(function()
-            firesignal(prompt.Triggered)
-            ok = true
-        end)
-        if ok then return true end
-    end
-
-    -- Способ 3: Прямой сетевой вызов Net.FireServer ровно 1 раз
-    local uid = ExtractDropUID(obj)
-    if uid then
-        pcall(function()
-            Net.FireServer(Msg.DropPickup, uid)
-        end)
-        return true
-    end
-
-    return false
-end
-
--- Проверка: допустим ли дроп по фильтру
-local function IsDropAllowed(obj)
-    if not obj or not obj.Parent then return false end
-
-    -- Сундуки, боссы, ящики ВСЕГДА подбираем
-    local objNameLower = string.lower(obj.Name)
-    if string.find(objNameLower, "chest") or string.find(objNameLower, "boss") or string.find(objNameLower, "box") or string.find(objNameLower, "crate") then
-        return true
-    end
-
-    local prompt = obj:FindFirstChildOfClass("ProximityPrompt", true)
-    if prompt then
-        local pText = string.lower(prompt.ObjectText .. " " .. prompt.ActionText)
-        if string.find(pText, "chest") or string.find(pText, "boss") or string.find(pText, "box") or string.find(pText, "crate") then
-            return true
-        end
-    end
-
-    if Context.Settings.LootAll then
-        return true
-    end
-
-    local rarity = Farm.GetDropRarity(obj)
-    local minTier = Context.Settings.MinLootTier or 6 -- По умолчанию Tier 6 (Mythic и выше)
-    return rarity >= minTier
-end
-
--- ═══════════════════════════════════════════════════════════
--- ЧЕЛОВЕЧЕСКИЙ АВТОЛУТ: персонаж лично доходит ногами (<= 5.5 studs) и подбирает
--- ═══════════════════════════════════════════════════════════
--- ═══════════════════════════════════════════════════════════
--- ЧЕЛОВЕЧЕСКИЙ ВИЗИТ К ДРОПУ: подойти ногами, постоять 1 сек и идти дальше
--- Никакого спама пакетами! Личный подход игрока к ценному предмету.
--- ═══════════════════════════════════════════════════════════
-local VisitedDrops = setmetatable({}, { __mode = "k" })
-local CurrentLootingDrop = nil
-local CurrentLootStartTime = 0
-
-function Farm.FindBestLootTarget()
-    local root = GetRootPart()
-    if not root then return nil end
-
-    local maxRadius = Context.Settings.LootRadius or 50.0
-    local bestDrop = nil
-    local bestDist = maxRadius
-
-    local function ScanFolder(folder)
-        if not folder then return end
-        for _, obj in ipairs(folder:GetChildren()) do
-            if obj and obj.Parent and not VisitedDrops[obj] then
-                local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
-                if part then
-                    local dist = (Vector3.new(part.Position.X, 0, part.Position.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
-                    if dist <= maxRadius and dist < bestDist then
-                        if IsDropAllowed(obj) then
-                            bestDist = dist
-                            bestDrop = obj
-                        end
+        local stages = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Stages")
+        if stages then
+            for _, obj in ipairs(stages:GetDescendants()) do
+                if obj:IsA("BasePart") then
+                    local lname = string.lower(obj.Name)
+                    if string.find(lname, "barrier") or string.find(lname, "wall") or string.find(lname, "gate") then
+                        obj.CanCollide = false
                     end
                 end
             end
         end
-    end
+    end)
+end
+disableAllBarriers()
 
-    ScanFolder(Workspace:FindFirstChild("DropsClient"))
-    ScanFolder(Workspace:FindFirstChild("Drops"))
+-- =============================================================================
+-- FLUENT UI AMETHYST THEME CONSTANTS
+-- =============================================================================
+local Theme = {
+    Background = Color3.fromRGB(18, 14, 28),
+    BackgroundGradTop = Color3.fromRGB(28, 20, 44),
+    BackgroundGradBot = Color3.fromRGB(14, 10, 22),
+    Accent = Color3.fromRGB(168, 85, 247),       -- Amethyst Purple
+    AccentHover = Color3.fromRGB(192, 132, 252),
+    Element = Color3.fromRGB(26, 20, 40),
+    ElementBorder = Color3.fromRGB(60, 42, 90),
+    Text = Color3.fromRGB(245, 243, 255),
+    SubText = Color3.fromRGB(167, 155, 185),
+    Sidebar = Color3.fromRGB(14, 10, 22),
+    TabHover = Color3.fromRGB(38, 28, 58),
+    TabSelected = Color3.fromRGB(48, 34, 74),
+    Stroke = Color3.fromRGB(120, 75, 180),
+}
 
-    return bestDrop
+local function tween(instance, duration, properties, style, direction)
+    local info = TweenInfo.new(duration or 0.22, style or Enum.EasingStyle.Quart, direction or Enum.EasingDirection.Out)
+    local t = TweenService:Create(instance, info, properties)
+    t:Play()
+    return t
 end
 
--- Шаг подхода к дропу: если есть предмет выше легендарки — персонаж подходит, ждёт 1 сек и идёт дальше
-function Farm.ProcessLootStep()
-    if not Context.Settings.AutoLoot then
-        CurrentLootingDrop = nil
-        return false
-    end
+-- =============================================================================
+-- SCREEN GUI & ROOT WINDOW
+-- =============================================================================
 
-    local root = GetRootPart()
-    local hum = GetHumanoid()
-    if not root or not hum then return false end
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = GUI_NAME
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+if syn and syn.protect_gui then syn.protect_gui(ScreenGui) end
+ScreenGui.Parent = parentGui
 
-    -- Если текущий предмет исчез или уже был посещён — сбрасываем
-    if CurrentLootingDrop and (not CurrentLootingDrop.Parent or VisitedDrops[CurrentLootingDrop]) then
-        CurrentLootingDrop = nil
-    end
+local RootWindow = Instance.new("Frame")
+RootWindow.Name = "FluentWindow"
+RootWindow.Size = UDim2.fromOffset(590, 455)
+local vp = workspace.CurrentCamera.ViewportSize
+RootWindow.Position = UDim2.fromOffset(math.floor(vp.X/2 - 295), math.floor(vp.Y/2 - 227))
+RootWindow.BackgroundColor3 = Theme.Background
+RootWindow.BorderSizePixel = 0
+RootWindow.ClipsDescendants = true
+RootWindow.Parent = ScreenGui
 
-    -- Ищем ближайший ценный предмет
-    if not CurrentLootingDrop then
-        CurrentLootingDrop = Farm.FindBestLootTarget()
-        CurrentLootStartTime = os.clock()
-    end
+local RootCorner = Instance.new("UICorner")
+RootCorner.CornerRadius = UDim.new(0, 12)
+RootCorner.Parent = RootWindow
 
-    local dropObj = CurrentLootingDrop
-    if not dropObj or not dropObj.Parent or VisitedDrops[dropObj] then
-        CurrentLootingDrop = nil
-        return false
-    end
+local RootGradient = Instance.new("UIGradient")
+RootGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0.0, Theme.BackgroundGradTop),
+    ColorSequenceKeypoint.new(1.0, Theme.BackgroundGradBot),
+})
+RootGradient.Rotation = 90
+RootGradient.Parent = RootWindow
 
-    -- Защита от долгого пути (не более 5 сек на дорогу к предмету)
-    if (os.clock() - CurrentLootStartTime) > 5.0 then
-        VisitedDrops[dropObj] = true
-        CurrentLootingDrop = nil
-        return false
-    end
+local RootStroke = Instance.new("UIStroke")
+RootStroke.Color = Theme.Stroke
+RootStroke.Transparency = 0.55
+RootStroke.Thickness = 1.2
+RootStroke.Parent = RootWindow
 
-    local part = dropObj:IsA("BasePart") and dropObj or dropObj:FindFirstChildWhichIsA("BasePart", true)
-    if not part then
-        VisitedDrops[dropObj] = true
-        CurrentLootingDrop = nil
-        return false
-    end
+-- Top Specular Acrylic Line
+local TopSpec = Instance.new("Frame")
+TopSpec.Size = UDim2.new(1, 0, 0, 1.2)
+TopSpec.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+TopSpec.BackgroundTransparency = 0.65
+TopSpec.BorderSizePixel = 0
+TopSpec.Parent = RootWindow
 
-    local dropPos = part.Position
-    local myPos = root.Position
-    local dist = (Vector3.new(dropPos.X, 0, dropPos.Z) - Vector3.new(myPos.X, 0, myPos.Z)).Magnitude
+-- =============================================================================
+-- TITLE BAR (Draggable)
+-- =============================================================================
+local TitleBar = Instance.new("Frame")
+TitleBar.Name = "TitleBar"
+TitleBar.Size = UDim2.new(1, 0, 0, 42)
+TitleBar.BackgroundTransparency = 1
+TitleBar.Parent = RootWindow
 
-    EnforceGroundState()
-
-    -- Если подошли вплотную (<= 4.5 studs) — стоим 1 сек и двигаемся дальше к новым локациям!
-    if dist <= 4.5 then
-        -- Одиночное нажатие промпта (если поддерживается инжектором)
-        local prompt = dropObj:FindFirstChildOfClass("ProximityPrompt", true)
-        if prompt and fireproximityprompt then
-            pcall(function()
-                prompt.HoldDuration = 0
-                prompt.RequiresLineOfSight = false
-                fireproximityprompt(prompt, 1, true)
-            end)
-        end
-
-        -- Стоим ровно 1 секунду на месте, как просил пользователь
-        task.wait(1.0)
-
-        -- Помечаем предмет как посещённый, чтобы сразу переключиться на следующие зоны/мобов
-        VisitedDrops[dropObj] = true
-        CurrentLootingDrop = nil
-        return true
-    end
-
-    -- Идём к предмету ногами по земле (через Raycast)
-    local groundTarget = GetGroundPosition(dropPos.X, dropPos.Z)
-    hum:MoveTo(groundTarget)
-
-    return true
-end
-
-function Farm.GetTargetEnemy(maxDistance)
-    maxDistance = maxDistance or Context.Settings.MaxTargetRange or 45.0
-
-    local enemiesFolder = Workspace:FindFirstChild("EnemiesClient")
-    if not enemiesFolder then return nil end
-
-    local root = GetRootPart()
-    if not root then return nil end
-
-    local bestTarget = nil
-    local minDistance = maxDistance
-
-    for _, enemy in ipairs(enemiesFolder:GetChildren()) do
-        if enemy:IsA("Model") then
-            local eHum = enemy:FindFirstChildOfClass("Humanoid")
-            local eHrp = enemy:FindFirstChild("HumanoidRootPart") or enemy:FindFirstChild("Torso")
-            if eHum and eHrp and eHum.Health > 0 then
-                local dist = (eHrp.Position - root.Position).Magnitude
-                if dist <= minDistance then
-                    minDistance = dist
-                    bestTarget = { Model = enemy, Root = eHrp, Hum = eHum, Distance = dist }
-                end
+-- Dragging Logic
+local dragging, dragStart, startPos
+TitleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = RootWindow.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
             end
-        end
-    end
-    return bestTarget
-end
-
-local LastAttackTime = 0
-local LastSkill1Time = 0
-local LastSkill2Time = 0
-local LastSkill3Time = 0
-
--- 100% Естественная ходьба ногами по земле к врагу и бой
-function Farm.AttackTargetLegit(target)
-    local root = GetRootPart()
-    local hum = GetHumanoid()
-    if not root or not hum or not target or not target.Root or target.Hum.Health <= 0 then return end
-
-    EnforceGroundState()
-
-    local myPos = root.Position
-    local targetPos = target.Root.Position
-    local flatDelta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
-    local dist = flatDelta.Magnitude
-
-    -- 1. Failsafe: отбегаем назад по земле, если HP < 30%
-    if Context.Settings.SmartHeal and hum.Health > 0 and (hum.Health / hum.MaxHealth) < 0.30 then
-        if dist > 0.1 then
-            local retreatPos = GetGroundPosition(myPos.X - flatDelta.Unit.X * 18, myPos.Z - flatDelta.Unit.Z * 18)
-            hum:MoveTo(retreatPos)
-        end
-        task.wait(0.25)
-        return
-    end
-
-    local desiredDist = Context.Settings.CombatDistance or 8.0
-
-    -- 2. Подход к мобу по центру
-    if dist > desiredDist + 1.5 then
-        hum:MoveTo(targetPos)
-    elseif dist < desiredDist - 2.5 then
-        local stepBack = myPos - flatDelta.Unit * 3.0
-        hum:MoveTo(stepBack)
-    else
-        -- На дистанции боя стоим и бьём в упор, поворачиваясь к мобу
-        local lookTarget = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
-        root.CFrame = CFrame.lookAt(myPos, lookTarget)
-    end
-
-    -- 3. Атака
-    local now = os.clock()
-    if (now - LastAttackTime) >= (Context.Settings.SwingDelay or 0.24) then
-        LastAttackTime = now
-        pcall(function()
-            SkillInput.Press(Enums.SkillSlot.NormalAttack)
         end)
     end
-
-    -- Навыки по таймерам
-    if (now - LastSkill1Time) >= 4.5 then
-        LastSkill1Time = now
-        pcall(function() SkillInput.Press(Enums.SkillSlot.Skill1) end)
+end)
+TitleBar.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        RootWindow.Position = UDim2.fromOffset(startPos.X.Offset + delta.X, startPos.Y.Offset + delta.Y)
     end
+end)
 
-    if (now - LastSkill2Time) >= 6.5 then
-        LastSkill2Time = now
-        pcall(function() SkillInput.Press(Enums.SkillSlot.Skill2) end)
-    end
+local TitleIcon = Instance.new("TextLabel")
+TitleIcon.Text = "💎"
+TitleIcon.TextSize = 14
+TitleIcon.Size = UDim2.new(0, 24, 0, 24)
+TitleIcon.Position = UDim2.new(0, 12, 0.5, -12)
+TitleIcon.BackgroundTransparency = 1
+TitleIcon.Parent = TitleBar
 
-    if (now - LastSkill3Time) >= 8.5 then
-        LastSkill3Time = now
-        pcall(function() SkillInput.Press(Enums.SkillSlot.Skill3) end)
-    end
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Text = "Sword Loot Monarch"
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextSize = 13.5
+TitleLabel.TextColor3 = Theme.Text
+TitleLabel.Size = UDim2.new(0, 140, 1, 0)
+TitleLabel.Position = UDim2.new(0, 38, 0, 0)
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Parent = TitleBar
 
-    -- Dash только если включён вручную
-    if Context.Settings.AutoDash and (now - Context.LastDashTime) >= 5.0 then
-        Context.LastDashTime = now
-        pcall(function() SkillInput.Press(Enums.SkillSlot.Dash) end)
+local SubTitleLabel = Instance.new("TextLabel")
+SubTitleLabel.Text = "by Ryomotik  •  Amethyst Edition"
+SubTitleLabel.Font = Enum.Font.GothamMedium
+SubTitleLabel.TextSize = 11.5
+SubTitleLabel.TextColor3 = Theme.SubText
+SubTitleLabel.Size = UDim2.new(0, 200, 1, 0)
+SubTitleLabel.Position = UDim2.new(0, 185, 0, 0)
+SubTitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+SubTitleLabel.BackgroundTransparency = 1
+SubTitleLabel.Parent = TitleBar
+
+-- Minimize Button
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 28, 0, 28)
+MinBtn.Position = UDim2.new(1, -36, 0.5, -14)
+MinBtn.BackgroundColor3 = Theme.Element
+MinBtn.BackgroundTransparency = 0.4
+MinBtn.Text = "—"
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 12
+MinBtn.TextColor3 = Theme.SubText
+MinBtn.AutoButtonColor = false
+MinBtn.Parent = TitleBar
+local MinCorner = Instance.new("UICorner")
+MinCorner.CornerRadius = UDim.new(0, 6)
+MinCorner.Parent = MinBtn
+
+MinBtn.MouseEnter:Connect(function()
+    tween(MinBtn, 0.18, { BackgroundColor3 = Theme.Accent, TextColor3 = Color3.fromRGB(255, 255, 255) })
+end)
+MinBtn.MouseLeave:Connect(function()
+    tween(MinBtn, 0.18, { BackgroundColor3 = Theme.Element, TextColor3 = Theme.SubText })
+end)
+MinBtn.MouseButton1Click:Connect(function()
+    Config.GuiVisible = false
+    ScreenGui.Enabled = false
+end)
+
+local TitleDivider = Instance.new("Frame")
+TitleDivider.Size = UDim2.new(1, 0, 0, 1)
+TitleDivider.Position = UDim2.new(0, 0, 0, 42)
+TitleDivider.BackgroundColor3 = Theme.ElementBorder
+TitleDivider.BackgroundTransparency = 0.5
+TitleDivider.BorderSizePixel = 0
+TitleDivider.Parent = RootWindow
+
+-- =============================================================================
+-- SIDEBAR & SMOOTH TAB SELECTOR
+-- =============================================================================
+local Sidebar = Instance.new("Frame")
+Sidebar.Name = "Sidebar"
+Sidebar.Size = UDim2.new(0, 155, 1, -43)
+Sidebar.Position = UDim2.new(0, 0, 0, 43)
+Sidebar.BackgroundColor3 = Theme.Sidebar
+Sidebar.BackgroundTransparency = 0.35
+Sidebar.BorderSizePixel = 0
+Sidebar.Parent = RootWindow
+
+local SidebarRightBorder = Instance.new("Frame")
+SidebarRightBorder.Size = UDim2.new(0, 1, 1, 0)
+SidebarRightBorder.Position = UDim2.new(1, -1, 0, 0)
+SidebarRightBorder.BackgroundColor3 = Theme.ElementBorder
+SidebarRightBorder.BackgroundTransparency = 0.5
+SidebarRightBorder.BorderSizePixel = 0
+SidebarRightBorder.Parent = Sidebar
+
+local TabListHolder = Instance.new("ScrollingFrame")
+TabListHolder.Size = UDim2.new(1, -14, 1, -50)
+TabListHolder.Position = UDim2.new(0, 7, 0, 10)
+TabListHolder.BackgroundTransparency = 1
+TabListHolder.BorderSizePixel = 0
+TabListHolder.ScrollBarThickness = 0
+TabListHolder.CanvasSize = UDim2.fromScale(0, 0)
+TabListHolder.Parent = Sidebar
+
+local TabListLayout = Instance.new("UIListLayout")
+TabListLayout.Padding = UDim.new(0, 4)
+TabListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+TabListLayout.Parent = TabListHolder
+
+-- Gliding Active Tab Selector Pill (Smooth spring-like vertical movement)
+local SelectorPill = Instance.new("Frame")
+SelectorPill.Name = "SelectorPill"
+SelectorPill.Size = UDim2.new(0, 3.5, 0, 20)
+SelectorPill.Position = UDim2.new(0, 2, 0, 8)
+SelectorPill.BackgroundColor3 = Theme.Accent
+SelectorPill.BorderSizePixel = 0
+SelectorPill.Parent = Sidebar
+local SelCorner = Instance.new("UICorner")
+SelCorner.CornerRadius = UDim.new(1, 0)
+SelCorner.Parent = SelectorPill
+
+-- Sidebar Footer User Chip
+local UserChip = Instance.new("Frame")
+UserChip.Size = UDim2.new(1, -16, 0, 32)
+UserChip.Position = UDim2.new(0, 8, 1, -38)
+UserChip.BackgroundColor3 = Theme.Element
+UserChip.BackgroundTransparency = 0.4
+UserChip.Parent = Sidebar
+local UCCorner = Instance.new("UICorner")
+UCCorner.CornerRadius = UDim.new(0, 6)
+UCCorner.Parent = UserChip
+local UCStroke = Instance.new("UIStroke")
+UCStroke.Color = Theme.ElementBorder
+UCStroke.Transparency = 0.6
+UCStroke.Thickness = 1
+UCStroke.Parent = UserChip
+
+local UCAvatar = Instance.new("TextLabel")
+UCAvatar.Text = "👑"
+UCAvatar.TextSize = 13
+UCAvatar.Size = UDim2.new(0, 24, 1, 0)
+UCAvatar.BackgroundTransparency = 1
+UCAvatar.Parent = UserChip
+
+local UCNick = Instance.new("TextLabel")
+UCNick.Text = "Ryomotik"
+UCNick.Font = Enum.Font.GothamBold
+UCNick.TextSize = 11.5
+UCNick.TextColor3 = Theme.Text
+UCNick.Position = UDim2.new(0, 26, 0, 0)
+UCNick.Size = UDim2.new(1, -26, 1, 0)
+UCNick.TextXAlignment = Enum.TextXAlignment.Left
+UCNick.BackgroundTransparency = 1
+UCNick.Parent = UserChip
+
+-- =============================================================================
+-- CONTENT AREA
+-- =============================================================================
+local ContentArea = Instance.new("Frame")
+ContentArea.Name = "ContentArea"
+ContentArea.Size = UDim2.new(1, -165, 1, -51)
+ContentArea.Position = UDim2.new(0, 160, 0, 47)
+ContentArea.BackgroundTransparency = 1
+ContentArea.Parent = RootWindow
+
+-- Tab Navigation System
+local Tabs = {}
+local TabButtons = {}
+local CurrentTabIndex = 1
+
+local function selectTab(index)
+    if not Tabs[index] then return end
+    CurrentTabIndex = index
+
+    for i, tabData in ipairs(Tabs) do
+        local btn = TabButtons[i]
+        local container = tabData.Container
+
+        if i == index then
+            -- Active button style
+            tween(btn, 0.2, { BackgroundColor3 = Theme.TabSelected, BackgroundTransparency = 0.2 })
+            btn.Title.TextColor3 = Theme.Text
+            btn.Title.Font = Enum.Font.GothamBold
+            btn.Icon.TextColor3 = Theme.Accent
+
+            -- Smooth selector movement
+            local targetY = btn.Position.Y.Offset + (btn.Size.Y.Offset / 2) - (SelectorPill.Size.Y.Offset / 2) + 10
+            tween(SelectorPill, 0.25, { Position = UDim2.new(0, 2, 0, targetY) }, Enum.EasingStyle.Quart)
+
+            -- Show container with fade & slide
+            container.Visible = true
+            container.Position = UDim2.new(0, 10, 0, 0)
+            container.GroupTransparency = 1
+            tween(container, 0.22, { Position = UDim2.new(0, 0, 0, 0), GroupTransparency = 0 })
+        else
+            -- Inactive button style
+            tween(btn, 0.2, { BackgroundColor3 = Theme.TabHover, BackgroundTransparency = 1 })
+            btn.Title.TextColor3 = Theme.SubText
+            btn.Title.Font = Enum.Font.GothamMedium
+            btn.Icon.TextColor3 = Theme.SubText
+            container.Visible = false
+        end
     end
 end
 
--- ЕСТЕСТВЕННЫЙ БЕГ ПО СЕРЕДИНЕ КОРИДОРА ЭТАПОВ
-function Farm.WalkForward()
-    local root = GetRootPart()
-    local hum = GetHumanoid()
-    if not root or not hum then return end
+local function createTab(title, iconText)
+    local tabIndex = #Tabs + 1
 
-    EnforceGroundState()
+    -- Sidebar Tab Button
+    local btn = Instance.new("TextButton")
+    btn.Name = "TabBtn_" .. title
+    btn.Size = UDim2.new(1, 0, 0, 34)
+    btn.Position = UDim2.new(0, 0, 0, (tabIndex - 1) * 38)
+    btn.BackgroundColor3 = Theme.TabHover
+    btn.BackgroundTransparency = 1
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.Parent = TabListHolder
+    local bCorn = Instance.new("UICorner")
+    bCorn.CornerRadius = UDim.new(0, 6)
+    bCorn.Parent = btn
 
-    -- 1. Если есть враг впереди — идём прямо к ближайшему врагу!
-    local enemy = Farm.GetTargetEnemy(Context.Settings.MaxTargetRange or 250.0)
-    if enemy and enemy.Root then
-        hum:MoveTo(enemy.Root.Position)
-        return
-    end
+    local icLbl = Instance.new("TextLabel")
+    icLbl.Name = "Icon"
+    icLbl.Text = iconText
+    icLbl.TextSize = 14
+    icLbl.Size = UDim2.new(0, 28, 1, 0)
+    icLbl.BackgroundTransparency = 1
+    icLbl.Parent = btn
 
-    -- 2. Врагов нет: идём строго ПО СЕРЕДИНЕ коридора этапа (центральная ось X = -1.2, направление -Z)
-    local currentPos = root.Position
-    local centerX = -1.2
-    local nextZ = currentPos.Z - 30
+    local tLbl = Instance.new("TextLabel")
+    tLbl.Name = "Title"
+    tLbl.Text = title
+    tLbl.Font = Enum.Font.GothamMedium
+    tLbl.TextSize = 12
+    tLbl.TextColor3 = Theme.SubText
+    tLbl.Position = UDim2.new(0, 30, 0, 0)
+    tLbl.Size = UDim2.new(1, -30, 1, 0)
+    tLbl.TextXAlignment = Enum.TextXAlignment.Left
+    tLbl.BackgroundTransparency = 1
+    tLbl.Parent = btn
 
-    -- Плавное удержание по центру: мягко возвращаем персонажа на ось X = -1.2
-    local diffX = centerX - currentPos.X
-    local stepX = currentPos.X + math.clamp(diffX, -6.0, 6.0)
+    btn.MouseEnter:Connect(function()
+        if CurrentTabIndex ~= tabIndex then
+            tween(btn, 0.18, { BackgroundTransparency = 0.6 })
+        end
+    end)
+    btn.MouseLeave:Connect(function()
+        if CurrentTabIndex ~= tabIndex then
+            tween(btn, 0.18, { BackgroundTransparency = 1 })
+        end
+    end)
+    btn.MouseButton1Click:Connect(function()
+        selectTab(tabIndex)
+    end)
 
-    local targetPos = Vector3.new(stepX, currentPos.Y, nextZ)
-    hum:MoveTo(targetPos)
-end
+    -- Tab Content Container (CanvasGroup for smooth fade-in)
+    local container = Instance.new("CanvasGroup")
+    container.Name = "TabContent_" .. title
+    container.Size = UDim2.new(1, 0, 1, 0)
+    container.BackgroundTransparency = 1
+    container.Visible = false
+    container.Parent = ContentArea
 
--- 6. СЛУЖЕБНЫЕ ХУКИ
-TrackConnection(LocalPlayer.Idled:Connect(function()
-    if Context.Settings.AntiAFK then
-        VirtualUser:CaptureController()
-        VirtualUser:ClickButton2(Vector2.new(0, 0))
-    end
-end))
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, 0, 1, 0)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 3
+    scroll.ScrollBarImageColor3 = Theme.Accent
+    scroll.ScrollBarImageTransparency = 0.7
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = container
 
-Farm.ApplyNativeLootFilter(Context.Settings.MinLootTier)
+    local scrollLayout = Instance.new("UIListLayout")
+    scrollLayout.Padding = UDim.new(0, 8)
+    scrollLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    scrollLayout.Parent = scroll
 
--- 7. DISCORD WEBHOOK
-local function SendWebhook()
-    if not Context.Settings.WebhookEnabled or Context.Settings.WebhookURL == "" or not HttpRequest then return end
+    local scrollPad = Instance.new("UIPadding")
+    scrollPad.PaddingRight = UDim.new(0, 10)
+    scrollPad.PaddingTop = UDim.new(0, 6)
+    scrollPad.PaddingBottom = UDim.new(0, 14)
+    scrollPad.Parent = scroll
 
-    local stats = GetStats()
-    local uptimeSec = math.floor(os.clock() - Context.StartTime)
-    local uptime = string.format("%02dч %02dм %02dс", math.floor(uptimeSec / 3600), math.floor((uptimeSec % 3600) / 60), uptimeSec % 60)
-
-    local payload = {
-        embeds = {{
-            title = "⚔️ [+1 Sword Loot Monarch] • Отчёт автофарма",
-            color = 9127187,
-            fields = {
-                { name = "👑 Разработчик", value = "`Ryomotik`", inline = true },
-                { name = "👤 Игрок", value = "`" .. LocalPlayer.Name .. " (" .. LocalPlayer.DisplayName .. ")`", inline = true },
-                { name = "⏱️ Время сессии", value = "`" .. uptime .. "`", inline = true },
-                { name = "⚡ Сила / Power", value = "`" .. tostring(math.floor(stats.Power)) .. "`", inline = false },
-                { name = "🔄 Перерождения", value = "`" .. tostring(stats.Rebirth) .. "`", inline = true },
-                { name = "💰 Монеты", value = "`" .. tostring(stats.Coins) .. "`", inline = true },
-                { name = "🗺️ Макс. Этап", value = "`Stage " .. tostring(stats.CareerMaxStage) .. "`", inline = true },
-                { name = "🛡️ Режим боя", value = "🟢 Ground Walker v3.0", inline = true }
-            },
-            footer = { text = "Sword Loot Monarch • by Ryomotik" },
-            timestamp = DateTime.now():ToIsoDate()
-        }}
+    local tabObj = {
+        Index = tabIndex,
+        Button = btn,
+        Container = container,
+        Scroll = scroll,
     }
 
-    pcall(function()
-        HttpRequest({
-            Url = Context.Settings.WebhookURL,
-            Method = "POST",
-            Headers = { ["Content-Type"] = "application/json" },
-            Body = HttpService:JSONEncode(payload)
-        })
-    end)
+    table.insert(Tabs, tabObj)
+    table.insert(TabButtons, btn)
+
+    return tabObj
 end
 
--- 8. ГЛАВНЫЕ ПОТОКИ
+-- =============================================================================
+-- FLUENT ELEMENT BUILDERS (Smooth animations & rounded edges)
+-- =============================================================================
 
--- Фоновый поток: Ground Enforcement (каждые 0.2 сек)
-SpawnThread(function()
-    while Context.Running do
-        if Context.Settings.AutoStageRun or Context.Settings.AutoMobs then
-            EnforceGroundState()
+local function addSection(tab, title)
+    local sec = Instance.new("Frame")
+    sec.Size = UDim2.new(1, 0, 0, 24)
+    sec.BackgroundTransparency = 1
+    sec.Parent = tab.Scroll
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Text = string.upper(title)
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 11
+    lbl.TextColor3 = Theme.Accent
+    lbl.Size = UDim2.new(1, 0, 1, 0)
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.BackgroundTransparency = 1
+    lbl.Parent = sec
+
+    return sec
+end
+
+local function addToggle(tab, title, desc, defaultVal, callback)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, desc and 48 or 38)
+    frame.BackgroundColor3 = Theme.Element
+    frame.BackgroundTransparency = 0.3
+    frame.BorderSizePixel = 0
+    frame.Parent = tab.Scroll
+
+    local fCorner = Instance.new("UICorner")
+    fCorner.CornerRadius = UDim.new(0, 8)
+    fCorner.Parent = frame
+
+    local fStroke = Instance.new("UIStroke")
+    fStroke.Color = Theme.ElementBorder
+    fStroke.Transparency = 0.6
+    fStroke.Thickness = 1
+    fStroke.Parent = frame
+
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Text = title
+    titleLbl.Font = Enum.Font.GothamMedium
+    titleLbl.TextSize = 12.5
+    titleLbl.TextColor3 = Theme.Text
+    titleLbl.Position = UDim2.new(0, 12, 0, desc and 8 or 10)
+    titleLbl.Size = UDim2.new(1, -70, 0, 16)
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.Parent = frame
+
+    if desc and desc ~= "" then
+        local descLbl = Instance.new("TextLabel")
+        descLbl.Text = desc
+        descLbl.Font = Enum.Font.Gotham
+        descLbl.TextSize = 10.5
+        descLbl.TextColor3 = Theme.SubText
+        descLbl.Position = UDim2.new(0, 12, 0, 26)
+        descLbl.Size = UDim2.new(1, -70, 0, 14)
+        descLbl.TextXAlignment = Enum.TextXAlignment.Left
+        descLbl.BackgroundTransparency = 1
+        descLbl.Parent = frame
+    end
+
+    local toggleBtn = Instance.new("TextButton")
+    toggleBtn.Size = UDim2.new(0, 42, 0, 22)
+    toggleBtn.Position = UDim2.new(1, -54, 0.5, -11)
+    toggleBtn.BackgroundColor3 = defaultVal and Theme.Accent or Color3.fromRGB(36, 26, 52)
+    toggleBtn.Text = ""
+    toggleBtn.AutoButtonColor = false
+    toggleBtn.Parent = frame
+    local tgCorner = Instance.new("UICorner")
+    tgCorner.CornerRadius = UDim.new(1, 0)
+    tgCorner.Parent = toggleBtn
+
+    local tgStroke = Instance.new("UIStroke")
+    tgStroke.Color = defaultVal and Theme.AccentHover or Theme.ElementBorder
+    tgStroke.Transparency = 0.4
+    tgStroke.Thickness = 1
+    tgStroke.Parent = toggleBtn
+
+    local thumb = Instance.new("Frame")
+    thumb.Size = UDim2.new(0, 16, 0, 16)
+    thumb.Position = defaultVal and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+    thumb.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    thumb.BorderSizePixel = 0
+    thumb.Parent = toggleBtn
+    local thCorner = Instance.new("UICorner")
+    thCorner.CornerRadius = UDim.new(1, 0)
+    thCorner.Parent = thumb
+
+    local state = defaultVal
+    toggleBtn.MouseButton1Click:Connect(function()
+        state = not state
+        local targetColor = state and Theme.Accent or Color3.fromRGB(36, 26, 52)
+        local strokeCol = state and Theme.AccentHover or Theme.ElementBorder
+        local targetPos = state and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+
+        tween(toggleBtn, 0.2, { BackgroundColor3 = targetColor })
+        tween(tgStroke, 0.2, { Color = strokeCol })
+        tween(thumb, 0.22, { Position = targetPos }, Enum.EasingStyle.Quart)
+
+        callback(state)
+    end)
+
+    return frame
+end
+
+local function addSlider(tab, title, minVal, maxVal, defaultVal, suffix, callback)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 52)
+    frame.BackgroundColor3 = Theme.Element
+    frame.BackgroundTransparency = 0.3
+    frame.BorderSizePixel = 0
+    frame.Parent = tab.Scroll
+
+    local fCorner = Instance.new("UICorner")
+    fCorner.CornerRadius = UDim.new(0, 8)
+    fCorner.Parent = frame
+
+    local fStroke = Instance.new("UIStroke")
+    fStroke.Color = Theme.ElementBorder
+    fStroke.Transparency = 0.6
+    fStroke.Thickness = 1
+    fStroke.Parent = frame
+
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Text = title
+    titleLbl.Font = Enum.Font.GothamMedium
+    titleLbl.TextSize = 12
+    titleLbl.TextColor3 = Theme.Text
+    titleLbl.Position = UDim2.new(0, 12, 0, 8)
+    titleLbl.Size = UDim2.new(1, -80, 0, 16)
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.Parent = frame
+
+    local valLbl = Instance.new("TextLabel")
+    valLbl.Text = tostring(defaultVal) .. suffix
+    valLbl.Font = Enum.Font.GothamBold
+    valLbl.TextSize = 11.5
+    valLbl.TextColor3 = Theme.Accent
+    valLbl.Position = UDim2.new(1, -70, 0, 8)
+    valLbl.Size = UDim2.new(0, 58, 0, 16)
+    valLbl.TextXAlignment = Enum.TextXAlignment.Right
+    valLbl.BackgroundTransparency = 1
+    valLbl.Parent = frame
+
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(1, -24, 0, 6)
+    track.Position = UDim2.new(0, 12, 0, 32)
+    track.BackgroundColor3 = Color3.fromRGB(36, 26, 52)
+    track.BorderSizePixel = 0
+    track.Parent = frame
+    local trCorner = Instance.new("UICorner")
+    trCorner.CornerRadius = UDim.new(1, 0)
+    trCorner.Parent = track
+
+    local pct = math.clamp((defaultVal - minVal) / (maxVal - minVal), 0, 1)
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(pct, 0, 1, 0)
+    fill.BackgroundColor3 = Theme.Accent
+    fill.BorderSizePixel = 0
+    fill.Parent = track
+    local fCornerFill = Instance.new("UICorner")
+    fCornerFill.CornerRadius = UDim.new(1, 0)
+    fCornerFill.Parent = fill
+
+    local thumb = Instance.new("Frame")
+    thumb.Size = UDim2.new(0, 14, 0, 14)
+    thumb.Position = UDim2.new(1, -7, 0.5, -7)
+    thumb.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    thumb.BorderSizePixel = 0
+    thumb.Parent = fill
+    local thCorner = Instance.new("UICorner")
+    thCorner.CornerRadius = UDim.new(1, 0)
+    thCorner.Parent = thumb
+
+    local draggingSlider = false
+    local function updateFromInput(input)
+        local posX = math.clamp((input.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        local rawVal = minVal + posX * (maxVal - minVal)
+        local val = math.floor(rawVal * 10) / 10
+        fill.Size = UDim2.new(posX, 0, 1, 0)
+        valLbl.Text = tostring(val) .. suffix
+        callback(val)
+    end
+
+    track.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingSlider = true
+            updateFromInput(input)
         end
-        task.wait(0.2)
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            updateFromInput(input)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingSlider = false
+        end
+    end)
+
+    return frame
+end
+
+local function addButton(tab, title, desc, callback)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, desc and 44 or 36)
+    btn.BackgroundColor3 = Theme.Element
+    btn.BackgroundTransparency = 0.25
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.Parent = tab.Scroll
+    local bCorner = Instance.new("UICorner")
+    bCorner.CornerRadius = UDim.new(0, 8)
+    bCorner.Parent = btn
+    local bStroke = Instance.new("UIStroke")
+    bStroke.Color = Theme.ElementBorder
+    bStroke.Transparency = 0.6
+    bStroke.Thickness = 1
+    bStroke.Parent = btn
+
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Text = title
+    titleLbl.Font = Enum.Font.GothamBold
+    titleLbl.TextSize = 12.5
+    titleLbl.TextColor3 = Theme.Text
+    titleLbl.Position = UDim2.new(0, 12, 0, desc and 7 or 10)
+    titleLbl.Size = UDim2.new(1, -40, 0, 16)
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.Parent = btn
+
+    if desc and desc ~= "" then
+        local descLbl = Instance.new("TextLabel")
+        descLbl.Text = desc
+        descLbl.Font = Enum.Font.Gotham
+        descLbl.TextSize = 10.5
+        descLbl.TextColor3 = Theme.SubText
+        descLbl.Position = UDim2.new(0, 12, 0, 24)
+        descLbl.Size = UDim2.new(1, -40, 0, 14)
+        descLbl.TextXAlignment = Enum.TextXAlignment.Left
+        descLbl.BackgroundTransparency = 1
+        descLbl.Parent = btn
+    end
+
+    local arr = Instance.new("TextLabel")
+    arr.Text = "▶"
+    arr.Font = Enum.Font.GothamBold
+    arr.TextSize = 11
+    arr.TextColor3 = Theme.Accent
+    arr.Size = UDim2.new(0, 20, 1, 0)
+    arr.Position = UDim2.new(1, -26, 0, 0)
+    arr.BackgroundTransparency = 1
+    arr.Parent = btn
+
+    btn.MouseEnter:Connect(function()
+        tween(btn, 0.18, { BackgroundColor3 = Theme.TabSelected, BackgroundTransparency = 0.1 })
+        tween(bStroke, 0.18, { Color = Theme.Accent })
+    end)
+    btn.MouseLeave:Connect(function()
+        tween(btn, 0.18, { BackgroundColor3 = Theme.Element, BackgroundTransparency = 0.25 })
+        tween(bStroke, 0.18, { Color = Theme.ElementBorder })
+    end)
+    btn.MouseButton1Click:Connect(function()
+        tween(btn, 0.1, { BackgroundColor3 = Theme.Accent })
+        task.wait(0.1)
+        tween(btn, 0.18, { BackgroundColor3 = Theme.TabSelected })
+        callback()
+    end)
+
+    return btn
+end
+
+local function addParagraph(tab, title, content)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 72)
+    frame.BackgroundColor3 = Theme.Element
+    frame.BackgroundTransparency = 0.3
+    frame.BorderSizePixel = 0
+    frame.Parent = tab.Scroll
+    local fCorner = Instance.new("UICorner")
+    fCorner.CornerRadius = UDim.new(0, 8)
+    fCorner.Parent = frame
+    local fStroke = Instance.new("UIStroke")
+    fStroke.Color = Theme.ElementBorder
+    fStroke.Transparency = 0.6
+    fStroke.Thickness = 1
+    fStroke.Parent = frame
+
+    local tLbl = Instance.new("TextLabel")
+    tLbl.Text = title
+    tLbl.Font = Enum.Font.GothamBold
+    tLbl.TextSize = 12.5
+    tLbl.TextColor3 = Theme.Accent
+    tLbl.Position = UDim2.new(0, 12, 0, 8)
+    tLbl.Size = UDim2.new(1, -24, 0, 16)
+    tLbl.TextXAlignment = Enum.TextXAlignment.Left
+    tLbl.BackgroundTransparency = 1
+    tLbl.Parent = frame
+
+    local cLbl = Instance.new("TextLabel")
+    cLbl.Text = content
+    cLbl.Font = Enum.Font.GothamMedium
+    cLbl.TextSize = 11
+    cLbl.TextColor3 = Theme.Text
+    cLbl.Position = UDim2.new(0, 12, 0, 26)
+    cLbl.Size = UDim2.new(1, -24, 0, 40)
+    cLbl.TextXAlignment = Enum.TextXAlignment.Left
+    cLbl.TextYAlignment = Enum.TextYAlignment.Top
+    cLbl.BackgroundTransparency = 1
+    cLbl.Parent = frame
+
+    return frame, cLbl
+end
+
+-- =============================================================================
+-- POPULATING TABS (Identical structure to user's GitHub repo)
+-- =============================================================================
+
+-- TAB 1: ФАРМ (SWORDS)
+local TabFarm = createTab("Фарм", "⚔️")
+addSection(TabFarm, "Автоматизация тренировок")
+addToggle(TabFarm, "Авто-клик силы (Native Clicker)", "Непрерывный софт-кап ~20 кликов/сек во время любых действий", Config.AutoClicker, function(v)
+    Config.AutoClicker = v
+end)
+addToggle(TabFarm, "Авто-перерождение (Auto Rebirth)", "Мгновенное перерождение при готовности (Rebirth 12 -> 13)", Config.AutoRebirth, function(v)
+    Config.AutoRebirth = v
+end)
+addToggle(TabFarm, "Авто-каст способностей и атака", "Автоматические удары мечом и кулдауны слотов", Config.AutoCast, function(v)
+    Config.AutoCast = v
+    pcall(Net.InvokeServer, Msg.SetAutoCast, v)
+end)
+addSlider(TabFarm, "Частота кликов в секунду", 5, 25, Config.ClickSpeed, " /сек", function(v)
+    Config.ClickSpeed = v
+end)
+
+-- TAB 2: ЭТАПЫ & БОЙ (CROSSHAIR)
+local TabStages = createTab("Этапы & Бой", "🎯")
+addSection(TabStages, "Прохождение локаций (Stages 1..38)")
+addToggle(TabStages, "Авто-прохождение этапов", "Умный No-Clip + взятие спавна + проход в WinArea", Config.AutoFarmStages, function(v)
+    Config.AutoFarmStages = v
+    if v then disableAllBarriers() end
+end)
+addSlider(TabStages, "Задержка зачистки этапа", 0.3, 2.5, Config.StageWaitTime, " сек", function(v)
+    Config.StageWaitTime = v
+end)
+addSection(TabStages, "Быстрые действия")
+
+-- Helper logic declarations
+local advanceOneStage
+
+addButton(TabStages, "Следующий этап ▶", "Телепортироваться и зачистить текущий этап", function()
+    if advanceOneStage then task.spawn(advanceOneStage) end
+end)
+addButton(TabStages, "В лобби (Сброс этапа) 🏠", "Вернуться в город и перезапустить заход", function()
+    pcall(function() Net.FireServer(Msg.StageReturnTown) end)
+end)
+
+-- TAB 3: ЛУТ & ТРОФЕИ (SHIELD)
+local TabLoot = createTab("Фильтр Лута", "🛡️")
+addSection(TabLoot, "Сбор выпавших предметов")
+addToggle(TabLoot, "Мгновенный авто-сбор лута (DropPickup)", "Перехват сетевого события DropSpawn и мгновенный сбор", Config.AutoPickup, function(v)
+    Config.AutoPickup = v
+end)
+
+-- TAB 4: ПРОКАЧКА & СТАТУС (TRENDING UP)
+local TabStats = createTab("Прокачка", "📈")
+addSection(TabStats, "Телеметрия охотника")
+
+local _, StatLabel = addParagraph(TabStats, "Показатели персонажа", "Мощность: Загрузка...\nУровень: 0 | Перерождений: 0\nЭтап: 0 / 38")
+
+-- EXP Progress Bar inside TabStats
+local ExpBarFrame = Instance.new("Frame")
+ExpBarFrame.Size = UDim2.new(1, 0, 0, 48)
+ExpBarFrame.BackgroundColor3 = Theme.Element
+ExpBarFrame.BackgroundTransparency = 0.3
+ExpBarFrame.BorderSizePixel = 0
+ExpBarFrame.Parent = TabStats.Scroll
+local ebCorner = Instance.new("UICorner")
+ebCorner.CornerRadius = UDim.new(0, 8)
+ebCorner.Parent = ExpBarFrame
+local ebStroke = Instance.new("UIStroke")
+ebStroke.Color = Theme.ElementBorder
+ebStroke.Transparency = 0.6
+ebStroke.Thickness = 1
+ebStroke.Parent = ExpBarFrame
+
+local ExpTitle = Instance.new("TextLabel")
+ExpTitle.Text = "Прогресс до следующего Rebirth"
+ExpTitle.Font = Enum.Font.GothamMedium
+ExpTitle.TextSize = 11.5
+ExpTitle.TextColor3 = Theme.SubText
+ExpTitle.Position = UDim2.new(0, 12, 0, 6)
+ExpTitle.Size = UDim2.new(1, -24, 0, 16)
+ExpTitle.TextXAlignment = Enum.TextXAlignment.Left
+ExpTitle.BackgroundTransparency = 1
+ExpTitle.Parent = ExpBarFrame
+
+local ExpTrack = Instance.new("Frame")
+ExpTrack.Size = UDim2.new(1, -24, 0, 6)
+ExpTrack.Position = UDim2.new(0, 12, 0, 28)
+ExpTrack.BackgroundColor3 = Color3.fromRGB(36, 26, 52)
+ExpTrack.BorderSizePixel = 0
+ExpTrack.Parent = ExpBarFrame
+local etCorner = Instance.new("UICorner")
+etCorner.CornerRadius = UDim.new(1, 0)
+etCorner.Parent = ExpTrack
+
+local ExpFill = Instance.new("Frame")
+ExpFill.Size = UDim2.new(0.5, 0, 1, 0)
+ExpFill.BackgroundColor3 = Theme.Accent
+ExpFill.BorderSizePixel = 0
+ExpFill.Parent = ExpTrack
+local efCorner = Instance.new("UICorner")
+efCorner.CornerRadius = UDim.new(1, 0)
+efCorner.Parent = ExpFill
+
+-- TAB 5: НАСТРОЙКИ (SETTINGS)
+local TabSettings = createTab("Настройки", "⚙️")
+addSection(TabSettings, "Интерфейс и управление")
+addParagraph(TabSettings, "Горячие клавиши", "• Нажмите [Left Control] чтобы свернуть или развернуть GUI.\n• Окно можно свободно перетаскивать мышью за заголовок.")
+
+-- Select first tab initially
+selectTab(1)
+
+-- Hotkey toggle
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if not gpe and input.KeyCode == Enum.KeyCode.LeftControl then
+        Config.GuiVisible = not Config.GuiVisible
+        ScreenGui.Enabled = Config.GuiVisible
     end
 end)
 
--- Поток тренировки силы
-SpawnThread(function()
-    while Context.Running do
-        if Context.Settings.AutoSwing and not Context.Settings.AutoStageRun and not Context.Settings.AutoMobs then
-            Farm.ClickTrain()
-            task.wait(Context.Settings.SwingDelay)
-        else
-            task.wait(0.2)
-        end
-    end
-end)
+-- =============================================================================
+-- LOGIC WORKERS (Exact same high-performance backend)
+-- =============================================================================
 
--- ═══════════════════════════════════════════════════════════
--- АВТО-ВОЗРОЖДЕНИЕ И ВХОД В ЭТАП (Бесконечный фарм без остановок)
--- ═══════════════════════════════════════════════════════════
-local LastStageSpawnTime = 0
-
-local LastDeathActionTime = 0
-function Farm.HandleDeathScreen()
-    local lp = LocalPlayer
-    local pg = lp:FindFirstChildOfClass("PlayerGui") or lp:FindFirstChild("PlayerGui")
-    if not pg then return false end
-
-    local hum = GetHumanoid()
-    local isHumDead = (hum and hum.Health <= 0)
-
-    -- 1. DeathGui (Окно "Вы умерли" с серой кнопкой "Вернуться в город")
-    local deathGui = pg:FindFirstChild("DeathGui")
-    local deathRoot = deathGui and deathGui:FindFirstChild("Root")
-
-    -- ВАЖНО: deathGui.Enabled в Roblox ВСЕГДА true!
-    -- Реальная смерть наступает ТОЛЬКО когда deathRoot.Visible == true или hum.Health <= 0!
-    if (deathRoot and deathRoot.Visible) or isHumDead then
-        local panel = deathRoot and deathRoot:FindFirstChild("Panel")
-        local ret = panel and panel:FindFirstChild("Return")
-        local btn = ret and ret:FindFirstChild("Btn")
-
-        local now = os.clock()
-        if (now - LastDeathActionTime) >= 1.0 then
-            LastDeathActionTime = now
-
-            if btn and btn:IsA("GuiButton") then
-                if firesignal then
-                    pcall(function() firesignal(btn.Activated) end)
-                    pcall(function() firesignal(btn.MouseButton1Click) end)
-                end
-                if getconnections then
-                    pcall(function()
-                        for _, c in ipairs(getconnections(btn.Activated)) do
-                            if c.Fire then pcall(function() c:Fire() end)
-                            elseif c.Function then pcall(c.Function) end
-                        end
-                        for _, c in ipairs(getconnections(btn.MouseButton1Click)) do
-                            if c.Fire then pcall(function() c:Fire() end)
-                            elseif c.Function then pcall(c.Function) end
-                        end
-                    end)
-                end
-            end
-
+-- 1. Continuous Training Clicker (~20 Hz)
+task.spawn(function()
+    while true do
+        if Config.AutoClicker then
             pcall(function()
-                Net.FireServer(Msg.StageReturnTown)
+                Net.FireServer(Msg.TrainManualClick)
+            end)
+            local waitTime = 1 / math.clamp(Config.ClickSpeed, 5, 25)
+            task.wait(waitTime)
+        else
+            task.wait(0.25)
+        end
+    end
+end)
+
+-- 2. Auto Rebirth Worker
+task.spawn(function()
+    while true do
+        if Config.AutoRebirth then
+            pcall(function()
+                Net.InvokeServer(Msg.PlayerRebirth)
+            end)
+            task.wait(1.5)
+        else
+            task.wait(1)
+        end
+    end
+end)
+
+-- 3. Drop Pickup
+pcall(function()
+    Net.OnClientEvent(Msg.DropSpawn, function(dropId)
+        if Config.AutoPickup and dropId then
+            task.spawn(function()
+                pcall(function()
+                    Net.FireServer(Msg.DropPickup, dropId)
+                end)
             end)
         end
-        return true
-    end
+    end)
+end)
 
-    return false
+-- Safe Move Helper
+local function safeMove(targetCF)
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.CFrame = targetCF
+    end
 end
 
-function Farm.CheckStageEntry()
-    if not Context.Settings.AutoStageRun then return end
+-- Smart Stage Progression
+advanceOneStage = function()
+    local stagesFolder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Stages")
+    if not stagesFolder then return end
 
-    local stage = LocalPlayer:GetAttribute("Stage")
-    -- Если stage == 0 или nil — персонаж находится в городе!
-    if stage == nil or stage == 0 then
-        local now = os.clock()
-        if (now - LastStageSpawnTime) >= 2.5 then
-            LastStageSpawnTime = now
+    disableAllBarriers()
+    local currentClear = LocalPlayer:GetAttribute("RunMaxClear") or 0
+    local nextStageNum = math.clamp(currentClear + 1, 1, 38)
+    local st = stagesFolder:FindFirstChild(tostring(nextStageNum))
+
+    if st then
+        local levelArea = st:FindFirstChild("LevelArea") or st:FindFirstChild("Spawn")
+        if levelArea then
+            safeMove(levelArea.CFrame + Vector3.new(0, 3, 0))
+            pcall(function() Net.FireServer(Msg.StageSpawnRequest, nextStageNum) end)
+            pcall(function() Net.InvokeServer(Msg.SetAutoCast, true) end)
+            task.wait(Config.StageWaitTime)
+        end
+
+        local winArea = st:FindFirstChild("WinArea")
+        local winFloor = winArea and winArea:FindFirstChild("Floor")
+        if winFloor then
+            safeMove(winFloor.CFrame + Vector3.new(0, 3, 0))
+            task.wait(0.4)
+        end
+
+        pcall(function() Net.FireServer(Msg.TrainManualClick) end)
+    end
+end
+
+-- 4. Auto Stage Farm Loop
+task.spawn(function()
+    while true do
+        if Config.AutoFarmStages then
+            advanceOneStage()
+            task.wait(0.5)
+        else
+            task.wait(0.5)
+        end
+    end
+end)
+
+-- 5. Real-time Status Display
+task.spawn(function()
+    while true do
+        pcall(function()
+            local p = LocalPlayer:GetAttribute("Power") or LocalPlayer:GetAttribute("PowerCurrent") or 0
             local maxClear = LocalPlayer:GetAttribute("RunMaxClear") or 0
-            local targetStage = math.max(1, maxClear + 1)
-            pcall(function()
-                Net.FireServer(Msg.StageSpawnRequest, targetStage)
-            end)
-        end
-    end
-end
-
--- ГЛАВНЫЙ ПОТОК: Единый цикл действий (Автолут > Бой > Коридор) — никаких конфликтов MoveTo!
-SpawnThread(function()
-    while Context.Running do
-        -- 0. ПРОВЕРКА СМЕРТИ: если открыт экран смерти — нажимаем серую кнопку "Вернуться в город"!
-        local isDead = Farm.HandleDeathScreen()
-
-        if isDead then
-            task.wait(1.0)
-        elseif Context.Settings.AutoStageRun or Context.Settings.AutoMobs or Context.Settings.AutoLoot then
-            -- 1. Если персонаж в городе — автоматически заходим на нужный этап!
-            Farm.CheckStageEntry()
-
-            -- 2. Человеческий визит к ценному дропу (Mythic+ / сундуки): подойти, постоять 1 сек и идти дальше
-            local lootingActive = false
-            if Context.Settings.AutoLoot then
-                lootingActive = Farm.ProcessLootStep()
+            
+            local reb = 0
+            local lvl = 0
+            local cd = require(LocalPlayer.PlayerScripts.Client.ClientData)
+            if cd and cd.Get then
+                local d = cd.Get()
+                reb = d.Rebirth or 0
+                lvl = d.Level or 0
             end
 
-            if lootingActive then
-                task.wait(0.1)
-            else
-                -- 3. Бой с мобами на пути
-                local target = (Context.Settings.AutoStageRun or Context.Settings.AutoMobs) and Farm.GetTargetEnemy(Context.Settings.MaxTargetRange or 250.0)
-
-                if target then
-                    Farm.AttackTargetLegit(target)
-                    task.wait(Context.Settings.SwingDelay)
+            local function formatNum(n)
+                if n >= 1e12 then
+                    return string.format("%.2fT", n / 1e12)
+                elseif n >= 1e9 then
+                    return string.format("%.2fB", n / 1e9)
+                elseif n >= 1e6 then
+                    return string.format("%.2fM", n / 1e6)
+                elseif n >= 1e3 then
+                    return string.format("%.1fK", n / 1e3)
                 else
-                    -- 4. Бег вперёд по коридору к новым этапам
-                    if Context.Settings.AutoStageRun then
-                        Farm.WalkForward()
-                    end
-                    task.wait(0.25)
+                    return tostring(math.floor(n))
                 end
             end
-        else
-            task.wait(0.3)
-        end
-    end
-end)
 
--- Поток авто-ребёрфа
-SpawnThread(function()
-    while Context.Running do
-        if Context.Settings.AutoRebirth then
-            Farm.Rebirth()
-            task.wait(Context.Settings.RebirthDelay)
-        else
-            task.wait(1)
-        end
-    end
-end)
+            local pStr = formatNum(tonumber(p) or 0)
+            local nextReq = (reb + 1) * 25
+            local pct = math.clamp(lvl / math.max(nextReq, 1), 0, 1)
 
--- Поток авто-экипировки
-SpawnThread(function()
-    while Context.Running do
-        if Context.Settings.AutoEquipBest then
-            Farm.EquipBest()
-            task.wait(Context.Settings.EquipInterval)
-        else
-            task.wait(1)
-        end
-    end
-end)
-
--- Поток Webhook
-SpawnThread(function()
-    while Context.Running do
-        if Context.Settings.WebhookEnabled and Context.Settings.WebhookURL ~= "" then
-            task.wait(Context.Settings.WebhookInterval)
-            SendWebhook()
-        else
-            task.wait(5)
-        end
-    end
-end)
-
--- 9. FLUENT UI (Amethyst Purple Edition — With Capability & CoreGui Protection)
-local function LoadFluent()
-    local fluentSource = nil
-    -- Загружаем пропатченную Fluent UI напрямую из репозитория
-    pcall(function()
-        local url = "https://raw.githubusercontent.com/ryomotik/SwordLootMonarch-Autofarm/main/fluent.lua?v=" .. tostring(os.time())
-        fluentSource = game:HttpGet(url, true)
-    end)
-
-    if not fluentSource or #fluentSource < 1000 then
-        pcall(function()
-            fluentSource = game:HttpGet("https://raw.githubusercontent.com/ryomotik/SwordLootMonarch-Autofarm/main/fluent.lua", true)
+            StatLabel.Text = "⚡ Мощность: " .. pStr .. "\n👑 Перерождений: " .. tostring(reb) .. "  •  Уровень: " .. tostring(lvl) .. " / " .. tostring(nextReq) .. "\n🏰 Очищено этапов: " .. tostring(maxClear) .. " / 38"
+            tween(ExpFill, 0.3, { Size = UDim2.new(pct, 0, 1, 0) })
+            ExpTitle.Text = "Прогресс до Rebirth " .. tostring(reb + 1) .. ": " .. tostring(lvl) .. "/" .. tostring(nextReq) .. " (" .. string.format("%.1f%%", pct * 100) .. ")"
         end)
-    end
-
-    if fluentSource and #fluentSource > 1000 then
-        local fn, loadErr = loadstring(fluentSource)
-        if fn then
-            local success, lib = pcall(fn)
-            if success and lib then
-                return lib
-            end
-        end
-    end
-    error("[Fluent Error]: Не удалось загрузить GUI библиотеку.")
-end
-
-local Fluent = LoadFluent()
-
-local Window = Fluent:CreateWindow({
-    Title = "Sword Loot Monarch",
-    SubTitle = "by Ryomotik • v3.1 Ground Walker",
-    TabWidth = 160,
-    Size = UDim2.fromOffset(580, 460),
-    Acrylic = false,
-    Theme = "Amethyst",
-    MinimizeKey = Enum.KeyCode.LeftControl
-})
-Fluent:SetTheme("Amethyst")
-
-local Tabs = {
-    Main = Window:AddTab({ Title = "Фарм", Icon = "swords" }),
-    Stages = Window:AddTab({ Title = "Этапы & Бой", Icon = "crosshair" }),
-    Loot = Window:AddTab({ Title = "Фильтр Лута", Icon = "shield" }),
-    Progress = Window:AddTab({ Title = "Прокачка", Icon = "trending-up" }),
-    Utility = Window:AddTab({ Title = "Сервис & AFK", Icon = "cpu" }),
-    Webhook = Window:AddTab({ Title = "Discord", Icon = "bell" }),
-    Settings = Window:AddTab({ Title = "Конфиг", Icon = "settings" })
-}
-
-local ToggleSwing = Tabs.Main:AddToggle("AutoSwing", { Title = "Авто-клик / Тренировка силы (Native)", Default = false })
-ToggleSwing:OnChanged(function(val) Context.Settings.AutoSwing = val end)
-
-Tabs.Main:AddSlider("SwingSpeed", {
-    Title = "Задержка клика / атаки (сек)",
-    Default = 0.08,
-    Min = 0.04,
-    Max = 0.5,
-    Rounding = 2,
-    Callback = function(val) Context.Settings.SwingDelay = val end
-})
-
--- Вкладка 2: Прохождение Этапов
-local ToggleStageRun = Tabs.Stages:AddToggle("AutoStageRun", {
-    Title = "🚀 Проход по локациям (Идти вперёд -> Убить мобов -> Дальше)",
-    Default = false
-})
-ToggleStageRun:OnChanged(function(val)
-    Context.Settings.AutoStageRun = val
-    if val then
-        Fluent:Notify({
-            Title = "Этапы",
-            Content = "Коридорный бег запущен! Персонаж идёт ногами, зачищает мобов и идёт дальше.",
-            Duration = 3.5
-        })
+        task.wait(0.4)
     end
 end)
 
-local ToggleMobs = Tabs.Stages:AddToggle("AutoMobs", {
-    Title = "Только бой с мобами рядом (без бега вперёд)",
-    Default = false
-})
-ToggleMobs:OnChanged(function(val) Context.Settings.AutoMobs = val end)
-
-Tabs.Stages:AddSlider("CombatDist", {
-    Title = "Дистанция удара мечом от моба (Studs)",
-    Default = 8.0,
-    Min = 5.0,
-    Max = 12.0,
-    Rounding = 1,
-    Callback = function(val) Context.Settings.CombatDistance = val end
-})
-
-Tabs.Stages:AddSlider("TargetRange", {
-    Title = "Радиус обнаружения врагов рядом (Studs)",
-    Default = 250.0,
-    Min = 20.0,
-    Max = 400.0,
-    Rounding = 0,
-    Callback = function(val) Context.Settings.MaxTargetRange = val end
-})
-
-local ToggleDash = Tabs.Stages:AddToggle("AutoDash", {
-    Title = "Рывок (Dash) в бою [Выкл = чистая ходьба ногами]",
-    Default = false
-})
-ToggleDash:OnChanged(function(val) Context.Settings.AutoDash = val end)
-
-local ToggleHeal = Tabs.Stages:AddToggle("SmartHeal", {
-    Title = "Отбегать назад при низком HP (<35%)",
-    Default = true
-})
-ToggleHeal:OnChanged(function(val) Context.Settings.SmartHeal = val end)
-
--- Вкладка 3: Фильтр Лута
-local ToggleLoot = Tabs.Loot:AddToggle("AutoLoot", {
-    Title = "👣 Подходить к ценному дропу (подождать 1 сек и идти дальше)",
-    Default = false
-})
-ToggleLoot:OnChanged(function(val) Context.Settings.AutoLoot = val end)
-
-local ToggleLootAll = Tabs.Loot:AddToggle("LootAll", {
-    Title = "🌟 Собирать абсолютно ВСЁ без фильтра (All Tiers)",
-    Default = false
-})
-ToggleLootAll:OnChanged(function(val)
-    Context.Settings.LootAll = val
-    if val then
-        Fluent:Notify({
-            Title = "Сбор лута",
-            Content = "Включен сбор абсолютно всех предметов без ограничений!",
-            Duration = 3
-        })
-    end
-end)
-
-local DropdownLoot = Tabs.Loot:AddDropdown("LootFilterDropdown", {
-    Title = "Минимальная редкость (если 'Всё' выключено)",
-    Values = {
-        "Мифик и выше (Mythic+) [Tier 6]",
-        "Строго выше мификов (Celestial+) [Tier 7]",
-        "Легендарный и выше (Legendary+) [Tier 5]",
-        "Эпический и выше (Epic+) [Tier 4]",
-        "Редкий и выше (Rare+) [Tier 3]",
-        "Обычный и выше (Common+ / Все) [Tier 1]"
-    },
-    Default = "Мифик и выше (Mythic+) [Tier 6]"
-})
-DropdownLoot:OnChanged(function(val)
-    if string.find(val, "Mythic+") then
-        Context.Settings.MinLootTier = 6
-    elseif string.find(val, "Celestial+") then
-        Context.Settings.MinLootTier = 7
-    elseif string.find(val, "Legendary+") then
-        Context.Settings.MinLootTier = 5
-    elseif string.find(val, "Epic+") then
-        Context.Settings.MinLootTier = 4
-    elseif string.find(val, "Rare+") then
-        Context.Settings.MinLootTier = 3
-    else
-        Context.Settings.MinLootTier = 1
-    end
-    Farm.ApplyNativeLootFilter(Context.Settings.MinLootTier)
-    Fluent:Notify({
-        Title = "Фильтр дропа",
-        Content = "Установлен порог редкости: " .. val,
-        Duration = 3
-    })
-end)
-
-Tabs.Loot:AddSlider("LootRadius", {
-    Title = "Радиус захвата лута (Studs)",
-    Default = 60.0,
-    Min = 15.0,
-    Max = 150.0,
-    Rounding = 0,
-    Callback = function(val) Context.Settings.LootRadius = val end
-})
-
-Tabs.Loot:AddSlider("LootInterval", {
-    Title = "Частота проверки лута (сек)",
-    Default = 0.3,
-    Min = 0.1,
-    Max = 1.0,
-    Rounding = 2,
-    Callback = function(val) Context.Settings.LootInterval = val end
-})
-
--- Вкладка 4: Прокачка
-local ToggleRebirth = Tabs.Progress:AddToggle("AutoRebirth", { Title = "Авто-перерождение (PlayerRebirth)", Default = false })
-ToggleRebirth:OnChanged(function(val) Context.Settings.AutoRebirth = val end)
-
-local ToggleEquip = Tabs.Progress:AddToggle("AutoEquip", { Title = "Авто-экипировка лучшего меча (InvEquipBest)", Default = false })
-ToggleEquip:OnChanged(function(val) Context.Settings.AutoEquipBest = val end)
-
-Tabs.Progress:AddButton({
-    Title = "⚔️ Экипировать лучший меч сейчас",
-    Callback = function()
-        Farm.EquipBest()
-        Fluent:Notify({ Title = "Инвентарь", Content = "InvEquipBest выполнен!", Duration = 2.5 })
-    end
-})
-
-Tabs.Progress:AddButton({
-    Title = "🔄 Сделать Rebirth сейчас",
-    Callback = function()
-        Farm.Rebirth()
-        Fluent:Notify({ Title = "Прокачка", Content = "PlayerRebirth выполнен!", Duration = 2.5 })
-    end
-})
-
--- Вкладка 5: Сервис и AFK
-local ToggleAntiAFK = Tabs.Utility:AddToggle("AntiAFK", { Title = "Встроенный Anti-AFK (VirtualUser)", Default = true })
-ToggleAntiAFK:OnChanged(function(val) Context.Settings.AntiAFK = val end)
-
-local ToggleFPS = Tabs.Utility:AddToggle("FPSBoost", { Title = "FPS Boost (Отключение 3D-рендеринга)", Default = false })
-ToggleFPS:OnChanged(function(val)
-    Context.Settings.FPSBoost = val
-    RunService:Set3dRenderingEnabled(not val)
-    if val and setfpscap then setfpscap(15) elseif setfpscap then setfpscap(60) end
-end)
-
--- Вкладка 6: Discord Webhook
-local ToggleWebhook = Tabs.Webhook:AddToggle("WebhookActive", { Title = "Включить отправку в Discord", Default = false })
-ToggleWebhook:OnChanged(function(val) Context.Settings.WebhookEnabled = val end)
-
-Tabs.Webhook:AddInput("WebhookURL", {
-    Title = "Webhook URL",
-    Default = "",
-    Placeholder = "https://discord.com/api/webhooks/...",
-    Finished = true,
-    Callback = function(val) Context.Settings.WebhookURL = val end
-})
-
-Tabs.Webhook:AddButton({
-    Title = "📡 Отправить тестовый отчет",
-    Callback = function()
-        if Context.Settings.WebhookURL ~= "" then
-            SendWebhook()
-            Fluent:Notify({ Title = "Webhook", Content = "Тестовый пакет отправлен в Discord!", Duration = 3 })
-        else
-            Fluent:Notify({ Title = "Ошибка", Content = "Сначала вставьте URL вебхука!", Duration = 3 })
-        end
-    end
-})
-
--- Вкладка 7: Настройки
-Tabs.Settings:AddKeybind("MenuBind", {
-    Title = "Клавиша скрытия меню",
-    Mode = "Toggle",
-    Default = "LeftControl",
-    Callback = function() end
-})
-
-Tabs.Settings:AddButton({
-    Title = "🗑️ Полная выгрузка скрипта (Unload)",
-    Callback = function()
-        Context:Unload()
-    end
-})
-
-function Context:Unload()
-    Context.Running = false
-    for _, conn in ipairs(Context.Connections) do
-        pcall(function() conn:Disconnect() end)
-    end
-    table.clear(Context.Connections)
-    table.clear(Context.Threads)
-    RunService:Set3dRenderingEnabled(true)
-    if setfpscap then setfpscap(60) end
-    if Fluent then
-        pcall(function() Fluent:Destroy() end)
-    end
-    if getgenv().__FluentActiveMotors then
-        for _, m in pairs(getgenv().__FluentActiveMotors) do
-            pcall(function() m:stop() end)
-        end
-        table.clear(getgenv().__FluentActiveMotors)
-    end
-    CleanupOldGuis()
-    getgenv().SwordMonarchInstance = nil
-    print("[Sword Monarch]: Выгружен из памяти.")
-end
-
-Window:SelectTab(2)
-Fluent:Notify({
-    Title = "Sword Loot Monarch",
-    Content = "v3.1 Ground Walker загружен! Автор: Ryomotik. Меню: LeftControl.",
-    Duration = 4
-})
+print("[ryomotik] Fluent UI (Amethyst Edition) loaded successfully!")
